@@ -1,93 +1,127 @@
-import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters
+import os
+from flask import Flask
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 )
-import asyncio
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+)
 
-# ===== Logging =====
+# ===================== CONFIG =====================
+TOKEN = os.getenv("BOT_TOKEN")  # BOT_TOKEN in Render Environment Variables
+CHANNELS = [os.getenv("CHANNEL_USERNAME"), os.getenv("CHANNEL_USERNAME")]   # change to yours
+JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"   # your image
+FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
+  # your template file
+STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA" 
+# pick one from your sticker pack link
+PORT = int(os.environ.get("PORT", 10000))  # Flask port
+# ===================================================
+
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ===== Environment Variables =====
-TOKEN = os.getenv("TOKEN")
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")  # e.g., @Blogger_Templates_Updated
-GROUP_USERNAME = os.getenv("GROUP_USERNAME")      # e.g., @Plus_UI_Official
-FILE_URL = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
-
-if not all([TOKEN, CHANNEL_USERNAME, GROUP_USERNAME]):
-    logger.error("❌ ERROR: TOKEN, CHANNEL_USERNAME, or GROUP_USERNAME not set.")
-    exit()
-
-# ===== Membership Check =====
-async def is_member(bot, chat_id, user_id) -> bool:
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        return member.status in ["member", "administrator", "creator"]
-    except Exception as e:
-        logger.error(f"Error checking membership for {user_id} in {chat_id}: {e}")
-        return False
-
-# ===== Start Command =====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    in_channel = await is_member(context.bot, CHANNEL_USERNAME, user_id)
-    in_group = await is_member(context.bot, GROUP_USERNAME, user_id)
-
-    if in_channel and in_group:
-        await update.message.reply_text("✅ You are verified! Sending your file...")
-        try:
-            await context.bot.send_document(chat_id=user_id, document=FILE_URL)
-        except Exception as e:
-            logger.error(f"Error sending file: {e}")
-            await update.message.reply_text(f"❌ Error sending file. Contact support.")
-    else:
-        # Buttons for joining
-        keyboard = [
-            [InlineKeyboardButton("Join Channel", url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}")],
-            [InlineKeyboardButton("Join Group", url=f"https://t.me/{GROUP_USERNAME.lstrip('@')}")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "❌ You must join both the Channel and Group to get the file.\n\n"
-            "After joining, type 'Done'.",
-            reply_markup=reply_markup
-        )
-
-# ===== Done Handler =====
-async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)
-
-# ===== Keep Alive for Render =====
-from flask import Flask
-import threading
-app = Flask("")
+app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot is alive!"
+    return "Bot is alive ✅"
 
-def run():
-    app.run(host="0.0.0.0", port=8080)
+# ================= Bot Handlers =================
 
-threading.Thread(target=run).start()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_join_message(update, context)
 
-# ===== Main =====
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "done":
+        user_id = query.from_user.id
+        # Check membership
+        if await is_member_all(context, user_id):
+            # ✅ Joined all
+            await query.delete_message()
+
+            username = query.from_user.first_name
+            # Sticker
+            await context.bot.send_sticker(chat_id=user_id, sticker=STICKER_ID)
+
+            # Welcome text
+            text = (
+                f"👋 Hello {username} !!!\n\n"
+                "📚 This Bot Helps You In Downloading the latest Plus UI Blogger template version\n\n"
+                "✨ Your theme is now ready..."
+            )
+            await context.bot.send_message(chat_id=user_id, text=text)
+
+            # Send file
+            await context.bot.send_document(chat_id=user_id, document=InputFile(FILE_PATH))
+
+        else:
+            # ❌ Not joined → delete old + send again
+            await query.delete_message()
+            await send_join_message(update, context, query=True)
+
+# Check all channels
+async def is_member_all(context, user_id: int) -> bool:
+    for ch in CHANNELS:
+        try:
+            member = await context.bot.get_chat_member(ch, user_id)
+            if member.status not in ["member", "administrator", "creator"]:
+                return False
+        except Exception as e:
+            logger.error(f"Error checking {ch}: {e}")
+            return False
+    return True
+
+# Send join message with image + buttons
+async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, query=False):
+    keyboard = [
+        [
+            InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
+            InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{CHANNELS[1].strip('@')}")
+        ],
+        [InlineKeyboardButton("✅ Done!!!", callback_data="done")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    caption = (
+        "💡 Join All Channels & Groups To Download the Latest Plus UI Blogger Template !!!\n\n"
+        "[ Plus UI Official Group ](t.me/plus_ui_official)\n\n"
+        "After joining, press ✅ Done!!!"
+    )
+
+    if query:
+        await update.callback_query.message.reply_photo(
+            photo=open(JOIN_IMAGE, "rb"),
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_photo(
+            photo=open(JOIN_IMAGE, "rb"),
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+
+# ================= Main =================
+
 def main():
-    logger.info("Starting bot...")
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex("(?i)^done$"), done))
-    app.run_polling()
+    bot_app = ApplicationBuilder().token(TOKEN).build()
+
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CallbackQueryHandler(button))
+
+    import threading
+    threading.Thread(target=lambda: bot_app.run_polling()).start()
+    app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
     main()
