@@ -2,20 +2,19 @@ import logging
 import os
 from flask import Flask
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 )
 
 # ===================== CONFIG =====================
 TOKEN = os.getenv("BOT_TOKEN")  # BOT_TOKEN in Render Environment Variables
-CHANNELS = [os.getenv("CHANNEL_USERNAME"), os.getenv("CHANNEL_USERNAME")]   # change to yours
-JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"   # your image
-FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
-  # your template file
-STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA" 
-# pick one from your sticker pack link
+CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]  # your channels/groups
+JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"  # your image
+FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"  # your template file
+STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"  # your sticker
 PORT = int(os.environ.get("PORT", 10000))  # Flask port
 # ===================================================
 
@@ -48,7 +47,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.delete_message()
 
             username = query.from_user.first_name
-            # Sticker
+            # Send sticker
             await context.bot.send_sticker(chat_id=user_id, sticker=STICKER_ID)
 
             # Welcome text
@@ -60,14 +59,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=user_id, text=text)
 
             # Send file
-            await context.bot.send_document(chat_id=user_id, document=InputFile(FILE_PATH))
+            await context.bot.send_document(chat_id=user_id, document=FILE_PATH)
 
         else:
             # ❌ Not joined → delete old + send again
             await query.delete_message()
             await send_join_message(update, context, query=True)
 
-# Check all channels
+# Check all channels/groups membership
 async def is_member_all(context, user_id: int) -> bool:
     for ch in CHANNELS:
         try:
@@ -92,23 +91,23 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     caption = (
         "💡 Join All Channels & Groups To Download the Latest Plus UI Blogger Template !!!\n\n"
-        "[ Plus UI Official Group ](t.me/plus_ui_official)\n\n"
+        "[ Plus UI Official Group ](t.me/Plus\\_UI\\_Official)\n\n"
         "After joining, press ✅ Done!!!"
     )
 
     if query:
         await update.callback_query.message.reply_photo(
-            photo=open(JOIN_IMAGE, "rb"),
+            photo=JOIN_IMAGE,
             caption=caption,
             reply_markup=reply_markup,
-            parse_mode="Markdown"
+            parse_mode=ParseMode.MARKDOWN_V2
         )
     else:
         await update.message.reply_photo(
-            photo=open(JOIN_IMAGE, "rb"),
+            photo=JOIN_IMAGE,
             caption=caption,
             reply_markup=reply_markup,
-            parse_mode="Markdown"
+            parse_mode=ParseMode.MARKDOWN_V2
         )
 
 # ================= Main =================
