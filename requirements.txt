@@ -1,1 +1,3 @@
 python-telegram-bot==20.5
+flask
+httpx~=0.24.1
