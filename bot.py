@@ -9,7 +9,7 @@ from telegram.ext import (
 )
 
 # ===================== CONFIG =====================
-TOKEN = os.getenv("BOT_TOKEN")  # ✅ set BOT_TOKEN in Render
+TOKEN = os.getenv("TOKEN")  # ✅ set BOT_TOKEN in Render
 CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
