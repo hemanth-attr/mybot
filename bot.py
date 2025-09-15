@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask app for Render
+# Flask app
 app = Flask(__name__)
 
 @app.route("/")
@@ -106,17 +106,20 @@ async def main():
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CallbackQueryHandler(button))
 
-    # Run bot + Flask together
-    async def run_flask():
-        from hypercorn.asyncio import serve
-        from hypercorn.config import Config
-        config = Config()
-        config.bind = [f"0.0.0.0:{PORT}"]
-        await serve(app, config)
+    # Start Telegram bot manually (not run_polling)
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling()
+
+    # Run Flask on same loop
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
+    config = Config()
+    config.bind = [f"0.0.0.0:{PORT}"]
 
     await asyncio.gather(
-        bot_app.run_polling(),
-        run_flask()
+        serve(app, config),
+        bot_app.updater.wait_for_stop()   # keep bot alive
     )
 
 if __name__ == "__main__":
