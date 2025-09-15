@@ -1,9 +1,8 @@
 import logging
 import os
+import asyncio
 from flask import Flask
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -24,6 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Flask app for Render healthcheck
 app = Flask(__name__)
 
 @app.route("/")
@@ -41,32 +41,23 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "done":
         user_id = query.from_user.id
-        # Check membership
         if await is_member_all(context, user_id):
-            # ✅ Joined all
             await query.delete_message()
 
             username = query.from_user.first_name
-            # Send sticker
             await context.bot.send_sticker(chat_id=user_id, sticker=STICKER_ID)
 
-            # Welcome text
             text = (
                 f"👋 Hello {username} !!!\n\n"
                 "📚 This Bot Helps You In Downloading the latest Plus UI Blogger template version\n\n"
                 "✨ Your theme is now ready..."
             )
             await context.bot.send_message(chat_id=user_id, text=text)
-
-            # Send file
             await context.bot.send_document(chat_id=user_id, document=FILE_PATH)
-
         else:
-            # ❌ Not joined → delete old + send again
             await query.delete_message()
             await send_join_message(update, context, query=True)
 
-# Check all channels/groups membership
 async def is_member_all(context, user_id: int) -> bool:
     for ch in CHANNELS:
         try:
@@ -78,7 +69,6 @@ async def is_member_all(context, user_id: int) -> bool:
             return False
     return True
 
-# Send join message with image + buttons
 async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, query=False):
     keyboard = [
         [
@@ -112,15 +102,24 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 # ================= Main =================
 
-def main():
+async def main():
     bot_app = ApplicationBuilder().token(TOKEN).build()
-
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CallbackQueryHandler(button))
 
-    import threading
-    threading.Thread(target=lambda: bot_app.run_polling()).start()
-    app.run(host="0.0.0.0", port=PORT)
+    # Run bot + Flask together
+    async def run_flask():
+        loop = asyncio.get_event_loop()
+        from hypercorn.asyncio import serve
+        from hypercorn.config import Config
+        config = Config()
+        config.bind = [f"0.0.0.0:{PORT}"]
+        await serve(app, config)
+
+    await asyncio.gather(
+        bot_app.run_polling(),
+        run_flask()
+    )
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
