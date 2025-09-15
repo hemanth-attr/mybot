@@ -1,15 +1,15 @@
 import logging
 import os
-import threading
+import asyncio
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, ContextTypes
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 )
 
 # ===================== CONFIG =====================
-TOKEN = os.getenv("TOKEN")  # ✅ set BOT_TOKEN in Render
+TOKEN = os.getenv("TOKEN")
 CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask app for Render healthcheck
+# Flask app for Render
 app = Flask(__name__)
 
 @app.route("/")
@@ -72,7 +72,7 @@ async def is_member_all(context, user_id: int) -> bool:
 async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, query=False):
     keyboard = [
         [
-            InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
+            InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
             InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{CHANNELS[1].strip('@')}")
         ],
         [InlineKeyboardButton("✅ Done!!!", callback_data="done")]
@@ -81,7 +81,6 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     caption = (
         "💡 Join All Channels & Groups To Download the Latest Plus UI Blogger Template !!!\n\n"
-        "[Plus UI Official Group](https://t.me/Plus_UI_Official)\n\n"
         "After joining, press ✅ Done!!!"
     )
 
@@ -90,28 +89,35 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             photo=JOIN_IMAGE,
             caption=caption,
             reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.HTML
         )
     else:
         await update.message.reply_photo(
             photo=JOIN_IMAGE,
             caption=caption,
             reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.HTML
         )
 
 # ================= Main =================
 
-def run_bot():
-    bot_app = Application.builder().token(TOKEN).build()
+async def main():
+    bot_app = ApplicationBuilder().token(TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CallbackQueryHandler(button))
 
-    bot_app.run_polling()
+    # Run bot + Flask together
+    async def run_flask():
+        from hypercorn.asyncio import serve
+        from hypercorn.config import Config
+        config = Config()
+        config.bind = [f"0.0.0.0:{PORT}"]
+        await serve(app, config)
+
+    await asyncio.gather(
+        bot_app.run_polling(),
+        run_flask()
+    )
 
 if __name__ == "__main__":
-    # Run bot in background
-    threading.Thread(target=run_bot, daemon=True).start()
-
-    # Run Flask
-    app.run(host="0.0.0.0", port=PORT)
+    asyncio.run(main())
