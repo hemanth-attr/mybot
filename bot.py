@@ -1,20 +1,20 @@
 import logging
 import os
-import asyncio
+import threading
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes
 )
 
 # ===================== CONFIG =====================
-TOKEN = os.getenv("TOKEN")  # BOT_TOKEN in Render Environment Variables
-CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]  # your channels/groups
-JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"  # your image
-FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"  # your template file
-STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"  # your sticker
-PORT = int(os.environ.get("PORT", 10000))  # Flask port
+TOKEN = os.getenv("BOT_TOKEN")  # ✅ set BOT_TOKEN in Render
+CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
+JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
+FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
+STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
+PORT = int(os.environ.get("PORT", 10000))
 # ===================================================
 
 logging.basicConfig(
@@ -72,7 +72,7 @@ async def is_member_all(context, user_id: int) -> bool:
 async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, query=False):
     keyboard = [
         [
-            InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
+            InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
             InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{CHANNELS[1].strip('@')}")
         ],
         [InlineKeyboardButton("✅ Done!!!", callback_data="done")]
@@ -80,8 +80,8 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     caption = (
-        "💡 Join All Channels & Groups To Download the Latest Plus UI Blogger Template !!!<br><br>"
-        '<a href="https://t.me/Plus_UI_Official">Plus UI Official Group</a><br><br>'
+        "💡 Join All Channels & Groups To Download the Latest Plus UI Blogger Template !!!\n\n"
+        "[Plus UI Official Group](https://t.me/Plus_UI_Official)\n\n"
         "After joining, press ✅ Done!!!"
     )
 
@@ -90,36 +90,28 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             photo=JOIN_IMAGE,
             caption=caption,
             reply_markup=reply_markup,
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.MARKDOWN
         )
     else:
         await update.message.reply_photo(
             photo=JOIN_IMAGE,
             caption=caption,
             reply_markup=reply_markup,
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.MARKDOWN
         )
 
 # ================= Main =================
 
-async def main():
-    bot_app = ApplicationBuilder().token(TOKEN).build()
+def run_bot():
+    bot_app = Application.builder().token(TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CallbackQueryHandler(button))
 
-    # Run bot + Flask together
-    async def run_flask():
-        loop = asyncio.get_event_loop()
-        from hypercorn.asyncio import serve
-        from hypercorn.config import Config
-        config = Config()
-        config.bind = [f"0.0.0.0:{PORT}"]
-        await serve(app, config)
-
-    await asyncio.gather(
-        bot_app.run_polling(),
-        run_flask()
-    )
+    bot_app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Run bot in background
+    threading.Thread(target=run_bot, daemon=True).start()
+
+    # Run Flask
+    app.run(host="0.0.0.0", port=PORT)
