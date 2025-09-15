@@ -1,5 +1,7 @@
 import logging
 import os
+import threading
+import asyncio
 from flask import Flask
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -24,6 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Flask app for Render health check
 app = Flask(__name__)
 
 @app.route("/")
@@ -41,16 +44,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "done":
         user_id = query.from_user.id
-        # Check membership
         if await is_member_all(context, user_id):
             # ✅ Joined all
             await query.delete_message()
 
             username = query.from_user.first_name
-            # Send sticker
             await context.bot.send_sticker(chat_id=user_id, sticker=STICKER_ID)
 
-            # Welcome text
             text = (
                 f"👋 Hello {username} !!!\n\n"
                 "📚 This Bot Helps You In Downloading the latest Plus UI Blogger template version\n\n"
@@ -58,7 +58,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await context.bot.send_message(chat_id=user_id, text=text)
 
-            # Send file
             await context.bot.send_document(chat_id=user_id, document=FILE_PATH)
 
         else:
@@ -91,7 +90,7 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     caption = (
         "💡 Join All Channels & Groups To Download the Latest Plus UI Blogger Template !!!\n\n"
-        "[ Plus UI Official Group ](t.me/Plus\\_UI\\_Official)\n\n"
+        "[ Plus UI Official Group ](t.me/Plus_UI_Official)\n\n"
         "After joining, press ✅ Done!!!"
     )
 
@@ -112,15 +111,19 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 # ================= Main =================
 
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT)
+
 def main():
     bot_app = ApplicationBuilder().token(TOKEN).build()
-
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CallbackQueryHandler(button))
 
-    import threading
-    threading.Thread(target=lambda: bot_app.run_polling()).start()
-    app.run(host="0.0.0.0", port=PORT)
+    # Run Flask in another thread
+    threading.Thread(target=run_flask).start()
+
+    # Run Telegram bot in main thread
+    asyncio.run(bot_app.run_polling())
 
 if __name__ == "__main__":
     main()
