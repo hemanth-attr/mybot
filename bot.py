@@ -1,31 +1,71 @@
 import logging
 import os
 import asyncio
-from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from flask import Flask, request
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.error import TelegramError
 
+# ==== Configuration ====
 TOKEN = os.getenv("TOKEN")
 CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., "https://plus-ui-bot.onrender.com"
 
+# ==== Logging ====
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+# ==== Flask App ====
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "Bot is alive ✅"
+bot = Bot(TOKEN)
+application = ApplicationBuilder().bot(bot).build()
 
-# ===== Bot Handlers =====
+# ==== Telegram Safe Functions ====
+async def safe_send_message(chat_id, text):
+    try:
+        await bot.send_message(chat_id=chat_id, text=text)
+    except TelegramError as e:
+        logger.warning(f"Send message failed to {chat_id}: {e}")
+
+async def safe_send_document(chat_id, document):
+    try:
+        await bot.send_document(chat_id=chat_id, document=document)
+    except TelegramError as e:
+        logger.warning(f"Send document failed to {chat_id}: {e}")
+
+async def safe_send_sticker(chat_id, sticker):
+    try:
+        await bot.send_sticker(chat_id=chat_id, sticker=sticker)
+    except TelegramError as e:
+        logger.warning(f"Send sticker failed to {chat_id}: {e}")
+
+async def safe_send_photo(message_obj, photo, caption, reply_markup):
+    try:
+        await message_obj.reply_photo(
+            photo=photo,
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML
+        )
+    except TelegramError as e:
+        logger.warning(f"Send photo failed: {e}")
+
+async def safe_delete(callback_query):
+    try:
+        await callback_query.delete_message()
+    except TelegramError as e:
+        logger.warning(f"Delete message failed: {e}")
+
+# ==== Bot Handlers ====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_join_message(update, context)
 
@@ -35,26 +75,23 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     if query.data == "done":
-        if await is_member_all(context, user_id):
-            await query.delete_message()
-            await context.bot.send_sticker(chat_id=user_id, sticker=STICKER_ID)
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is now ready..."
-            )
-            await context.bot.send_document(chat_id=user_id, document=FILE_PATH)
+        if await is_member_all(user_id):
+            await safe_delete(query)
+            await safe_send_sticker(user_id, STICKER_ID)
+            await safe_send_message(user_id, f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is ready!")
+            await safe_send_document(user_id, FILE_PATH)
         else:
-            await query.delete_message()
+            await safe_delete(query)
             await send_join_message(update, context, query=True)
 
-async def is_member_all(context, user_id: int) -> bool:
+async def is_member_all(user_id: int) -> bool:
     for ch in CHANNELS:
         try:
-            member = await context.bot.get_chat_member(ch, user_id)
+            member = await bot.get_chat_member(ch, user_id)
             if member.status not in ["member", "administrator", "creator"]:
                 return False
-        except Exception as e:
-            logger.error(f"Error checking {ch}: {e}")
+        except TelegramError as e:
+            logger.warning(f"Membership check failed for {ch}: {e}")
             return False
     return True
 
@@ -67,35 +104,70 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         [InlineKeyboardButton("✅ Done!!!", callback_data="done")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    caption = "💡 Join All Channels & Groups To Download the Latest Plus UI Blogger Template !!!\nAfter joining, press ✅ Done!!!"
+    caption = "💡 Join all channels & groups to download the latest Plus UI Blogger Template! Press ✅ Done after joining."
 
     if query:
-        await update.callback_query.message.reply_photo(photo=JOIN_IMAGE, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        await safe_send_photo(update.callback_query.message, JOIN_IMAGE, caption, reply_markup)
     else:
-        await update.message.reply_photo(photo=JOIN_IMAGE, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        await safe_send_photo(update.message, JOIN_IMAGE, caption, reply_markup)
 
-# ===== Main =====
+# ==== Flask Webhook Routes ====
+@app.route("/")
+def home():
+    return "Bot is alive ✅"
+
+@app.route("/ping")
+def ping():
+    return "OK"
+
+@app.route(f"/{TOKEN}", methods=["POST"])
+async def webhook():
+    try:
+        data = await request.get_json(force=True)
+        update = Update.de_json(data, bot)
+        await application.update_queue.put(update)
+        return "OK"
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return "Error", 500
+
+# ==== Bot Runner ====
+async def run_bot():
+    try:
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(button))
+
+        # Setup webhook
+        if WEBHOOK_URL:
+            try:
+                await bot.delete_webhook()
+                await bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
+                logger.info(f"Webhook set: {WEBHOOK_URL}/{TOKEN}")
+            except TelegramError as e:
+                logger.error(f"Webhook setup failed: {e}")
+
+        # Start bot
+        await application.initialize()
+        await application.start()
+        logger.info("Bot started successfully ✅")
+
+        # Wait indefinitely (webhook mode handles updates)
+        await asyncio.Event().wait()
+
+    except Exception as e:
+        logger.error(f"Bot crashed: {e}")
+        await asyncio.sleep(5)
+        await run_bot()
+
+# ==== Main Entry Point ====
 async def main():
-    bot_app = ApplicationBuilder().token(TOKEN).build()
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CallbackQueryHandler(button))
-
-    await bot_app.initialize()
-    await bot_app.start()
-    polling_task = asyncio.create_task(bot_app.updater.start_polling())
-
-    # Start Flask server concurrently
+    bot_task = asyncio.create_task(run_bot())
     from hypercorn.asyncio import serve
     from hypercorn.config import Config
     config = Config()
     config.bind = [f"0.0.0.0:{PORT}"]
-
     await serve(app, config)
-
-    # Shutdown bot when Flask stops
-    polling_task.cancel()
-    await bot_app.stop()
-    await bot_app.shutdown()
+    bot_task.cancel()
 
 if __name__ == "__main__":
     asyncio.run(main())
