@@ -98,7 +98,7 @@ async def is_member_all(user_id: int) -> bool:
 async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, query=False):
     keyboard = [
         [
-            InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
+            InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
             InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{CHANNELS[1].strip('@')}")
         ],
         [InlineKeyboardButton("✅ Done!!!", callback_data="done")]
@@ -123,7 +123,7 @@ def ping():
 @app.route(f"/{TOKEN}", methods=["POST"])
 async def webhook():
     try:
-        data = await request.get_json(force=True)
+        data = request.get_json(force=True)
         update = Update.de_json(data, bot)
         await application.update_queue.put(update)
         return "OK"
