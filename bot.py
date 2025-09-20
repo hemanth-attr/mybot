@@ -121,11 +121,11 @@ def ping():
     return "OK"
 
 @app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook():
+def webhook():
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, bot)
-        await application.update_queue.put(update)
+        asyncio.create_task(application.update_queue.put(update))  # enqueue update asynchronously
         return "OK"
     except Exception as e:
         logger.error(f"Webhook error: {e}")
