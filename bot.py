@@ -1,7 +1,7 @@
 import logging
 import os
 import asyncio
-from flask import Flask, request
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -14,7 +14,6 @@ JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnai
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., "https://plus-ui-bot.onrender.com"
 
 # ==== Logging ====
 logging.basicConfig(
@@ -26,6 +25,15 @@ logger = logging.getLogger(__name__)
 # ==== Flask App ====
 app = Flask(__name__)
 
+@app.route("/")
+def home():
+    return "Bot is alive ✅"
+
+@app.route("/ping")
+def ping():
+    return "OK"
+
+# ==== Bot Setup ====
 bot = Bot(TOKEN)
 application = ApplicationBuilder().bot(bot).build()
 
@@ -111,49 +119,20 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     else:
         await safe_send_photo(update.message, JOIN_IMAGE, caption, reply_markup)
 
-# ==== Flask Webhook Routes ====
-@app.route("/")
-def home():
-    return "Bot is alive ✅"
-
-@app.route("/ping")
-def ping():
-    return "OK"
-
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, bot)
-        asyncio.create_task(application.update_queue.put(update))  # enqueue update asynchronously
-        return "OK"
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return "Error", 500
-
-# ==== Bot Runner ====
+# ==== Run Bot in Polling Mode ====
 async def run_bot():
     try:
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CallbackQueryHandler(button))
 
-        # Setup webhook
-        if WEBHOOK_URL:
-            try:
-                await bot.delete_webhook()
-                await bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
-                logger.info(f"Webhook set: {WEBHOOK_URL}/{TOKEN}")
-            except TelegramError as e:
-                logger.error(f"Webhook setup failed: {e}")
-
-        # Start bot
+        # Initialize and start polling
         await application.initialize()
         await application.start()
-        logger.info("Bot started successfully ✅")
+        await application.updater.start_polling()  # <-- This handles all updates
+        logger.info("Bot started with polling ✅")
 
-        # Wait indefinitely (webhook mode handles updates)
+        # Keep running
         await asyncio.Event().wait()
-
     except Exception as e:
         logger.error(f"Bot crashed: {e}")
         await asyncio.sleep(5)
@@ -162,11 +141,14 @@ async def run_bot():
 # ==== Main Entry Point ====
 async def main():
     bot_task = asyncio.create_task(run_bot())
+
+    # Run Flask app
     from hypercorn.asyncio import serve
     from hypercorn.config import Config
     config = Config()
     config.bind = [f"0.0.0.0:{PORT}"]
     await serve(app, config)
+
     bot_task.cancel()
 
 if __name__ == "__main__":
