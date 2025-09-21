@@ -18,10 +18,8 @@ from telegram.error import TelegramError
 
 # ================= Configuration =================
 TOKEN = os.getenv("TOKEN")
-CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
-STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
 ALLOWED_GROUP_ID = -1002810504524
 WARNINGS_FILE = "warnings.json"
@@ -110,41 +108,114 @@ async def safe_delete(callback_query):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_send_message(update.effective_chat.id, "👋 Welcome! Please follow the instructions.")
 
+# ================= Button Handler =================
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # ================= Done / Verified =================
     if query.data == "done":
         user_id = query.from_user.id
         await safe_send_message(user_id, "✨ Verified! Your theme is ready.")
         await safe_send_document(user_id, FILE_PATH)
 
+    # ================= Cancel Warn =================
     elif query.data.startswith("cancel_warn"):
         _, chat_id, user_id = query.data.split(":")
         chat_id = int(chat_id)
         user_id = int(user_id)
 
-        # Check admin rights
+        # Admin check
         chat_admins = await bot.get_chat_administrators(chat_id)
         admin_ids = [admin.user.id for admin in chat_admins]
-
         if query.from_user.id not in admin_ids:
-            await query.answer("🚫 Only admins can cancel warnings!", show_alert=True)
+            await query.answer(
+                "Blogger Templates\n⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
+                show_alert=True
+            )
             return
 
-        # Reset warning
+        # Reset warnings
         chat_id_str = str(chat_id)
         user_id_str = str(user_id)
         if chat_id_str in warnings and user_id_str in warnings[chat_id_str]:
             del warnings[chat_id_str][user_id_str]
             save_warnings()
 
-        await safe_delete(query)
-        await safe_send_message(chat_id, f"✅ Warnings reset for user <code>{user_id}</code>")
+        # Remove mute if applied
+        try:
+            await bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_media_messages=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                    can_change_info=True,
+                    can_invite_users=True,
+                    can_pin_messages=True
+                )
+            )
+        except TelegramError:
+            pass
 
+        current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
+        await query.message.edit_text(
+            f"✅ @{query.from_user.username}'s warnings have been reset!\n"
+            f"• Action: Warns (0/3)\n"
+            f"• Reset on: {current_time}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{user_id}")]]
+            )
+        )
+
+    # ================= Unmute =================
+    elif query.data.startswith("unmute"):
+        _, chat_id, user_id = query.data.split(":")
+        chat_id = int(chat_id)
+        user_id = int(user_id)
+
+        # Admin check
+        chat_admins = await bot.get_chat_administrators(chat_id)
+        admin_ids = [admin.user.id for admin in chat_admins]
+        if query.from_user.id not in admin_ids:
+            await query.answer(
+                "⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
+                show_alert=True
+            )
+            return
+
+        # Remove mute
+        await bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+                can_change_info=True,
+                can_invite_users=True,
+                can_pin_messages=True
+            )
+        )
+
+        current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
+        await query.message.edit_text(
+            f"🔊 @{query.from_user.username} has been unmuted!\n"
+            f"• Action: Unmuted\n"
+            f"• Time: {current_time}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{user_id}")]]
+            )
+        )
+
+# ================= Message Handler =================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_expired_warnings()
-
     if not update.message:
         return
 
@@ -168,22 +239,34 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         warn_count, expiry = add_warning(chat.id, user.id)
         expiry_str = datetime.fromisoformat(expiry).strftime("%d/%m/%Y %H:%M")
 
-        # Warn as independent photo (not reply)
-        keyboard = [
-            [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]
-        ]
+        # Format messages exactly like your requested template
+        if warn_count == 1:
+            caption = (
+                f"@{user.username if user.username else user.first_name} [{user.id}] sent a spam message.\n"
+                f"Action: Warn (1/3) ❕ until {expiry_str}."
+            )
+            keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
+
+        elif warn_count == 2:
+            caption = (
+                f"@{user.username if user.username else user.first_name} [{user.id}] sent a spam message.\n"
+                f"Action: Warn (2/3) ❗ until {expiry_str}."
+            )
+            keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
+
+        else:  # Final warn (3/3)
+            caption = (
+                f"@{user.username if user.username else user.first_name} [{user.id}] sent a spam message.\n"
+                f"• Warns now: (3/3) ❕ until {expiry_str}.\n"
+                f"• Action: Muted 🔇"
+            )
+            keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{user.id}")]]
+
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        caption = (
-            f"⚠ <b>Action:</b> Warn ({warn_count}/3)\n"
-            f"👤 <b>User:</b> @{user.username if user.username else user.first_name} [{user.id}]\n"
-            f"⏳ <b>Until:</b> {expiry_str}"
-        )
-
-        await bot.send_photo(
+        await bot.send_message(
             chat_id=chat.id,
-            photo=JOIN_IMAGE,
-            caption=caption,
+            text=caption,
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
@@ -197,12 +280,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=until_date
             )
-            await safe_send_message(chat.id, f"{user.first_name} has been muted for 1 day ⚠")
 
 # ================= Run Bot =================
 async def run_bot():
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*)$"))
+    application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*)$"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
     await application.initialize()
