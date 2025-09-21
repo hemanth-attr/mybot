@@ -1,17 +1,18 @@
 import os
 import re
+import json
 import asyncio
 import logging
 from datetime import datetime, timedelta
 from flask import Flask
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ChatPermissions, Bot
+    ChatPermissions, Bot, InputFile
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
 )
 from telegram.error import TelegramError
 
@@ -23,6 +24,7 @@ FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
 ALLOWED_GROUP_ID = -1002810504524  # Only this group will auto-mute users
+WARNINGS_FILE = "warnings.json"
 
 # ================= Logging =================
 logging.basicConfig(
@@ -47,32 +49,59 @@ bot = Bot(TOKEN)
 application = ApplicationBuilder().bot(bot).build()
 
 # ================= Global Data =================
-warnings = {}  # {chat_id: {user_id: {"count": int, "expiry": datetime}}}
 url_pattern = re.compile(r"(https?://\S+|www\.\S+|t\.me/\S+)", re.IGNORECASE)
 
-# ================= Helper Functions =================
+# ----------------- Warnings Persistence -----------------
+def load_warnings():
+    if os.path.exists(WARNINGS_FILE):
+        with open(WARNINGS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_warnings():
+    with open(WARNINGS_FILE, "w") as f:
+        json.dump(warnings, f, default=str)
+
+warnings = load_warnings()
+
 def add_warning(chat_id: int, user_id: int):
-    chat_warns = warnings.setdefault(chat_id, {})
-    user_warn = chat_warns.get(user_id, {"count": 0, "expiry": datetime.now()})
-    
+    chat_warns = warnings.setdefault(str(chat_id), {})
+    user_warn = chat_warns.get(str(user_id), {"count": 0, "expiry": str(datetime.now())})
+
     user_warn["count"] += 1
-    user_warn["expiry"] = datetime.now() + timedelta(days=1)
-    chat_warns[user_id] = user_warn
-    
+    user_warn["expiry"] = str(datetime.now() + timedelta(days=1))
+    chat_warns[str(user_id)] = user_warn
+    save_warnings()
+
     return user_warn["count"], user_warn["expiry"]
 
 def clean_expired_warnings():
     now = datetime.now()
     for chat_id in list(warnings.keys()):
         for user_id in list(warnings[chat_id].keys()):
-            if warnings[chat_id][user_id]["expiry"] < now:
+            expiry = datetime.fromisoformat(warnings[chat_id][user_id]["expiry"])
+            if expiry < now:
                 del warnings[chat_id][user_id]
+    save_warnings()
 
+# ================= Safe Telegram Functions =================
 async def safe_send_message(chat_id, text):
     try:
         await bot.send_message(chat_id=chat_id, text=text)
     except TelegramError as e:
         logger.warning(f"Send message failed to {chat_id}: {e}")
+
+async def safe_send_document(chat_id, document):
+    try:
+        await bot.send_document(chat_id=chat_id, document=document)
+    except TelegramError as e:
+        logger.warning(f"Send document failed to {chat_id}: {e}")
+
+async def safe_send_sticker(chat_id, sticker):
+    try:
+        await bot.send_sticker(chat_id=chat_id, sticker=sticker)
+    except TelegramError as e:
+        logger.warning(f"Send sticker failed to {chat_id}: {e}")
 
 async def safe_send_photo(message_obj, photo, caption, reply_markup):
     try:
@@ -91,6 +120,7 @@ async def safe_delete(callback_query):
     except TelegramError as e:
         logger.warning(f"Delete message failed: {e}")
 
+# ================= Helper Functions =================
 async def is_member_all(user_id: int) -> bool:
     for ch in CHANNELS:
         try:
@@ -131,48 +161,39 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await is_member_all(user_id):
             await safe_delete(query)
 
-            # Send sticker as reply
-            try:
-                await query.message.reply_sticker(STICKER_ID)
-            except TelegramError as e:
-                logger.warning(f"Failed to send sticker: {e}")
-
-            # Send greeting
-            await query.message.reply_text(f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is ready!")
-
-            # Send file as reply
-            try:
-                await query.message.reply_document(
-                    document=FILE_PATH,
-                    filename="Plus-Ui-3.2.0-Updated.zip"
-                )
-            except TelegramError as e:
-                logger.warning(f"Failed to send document: {e}")
+            # Send sticker + greeting + ZIP in private chat
+            await safe_send_sticker(user_id, STICKER_ID)
+            await safe_send_message(user_id, f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is ready!")
+            await safe_send_document(user_id, FILE_PATH)
         else:
             await safe_delete(query)
             await send_join_message(update, context, query=True)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_expired_warnings()
-    
+
     if not update.message:
         return
-    
+
     user = update.message.from_user
     chat = update.effective_chat
     text = update.message.text or ""
-    
+
     # Skip admins
     chat_admins = await chat.get_administrators()
     admin_ids = [admin.user.id for admin in chat_admins]
     if user.id in admin_ids:
         return
-    
+
     # Detect links or forwarded messages
     if update.message.forward_from or url_pattern.search(text):
-        await update.message.delete()
+        try:
+            await update.message.delete()
+        except Exception:
+            logger.warning("Failed to delete user message")
+
         warn_count, expiry = add_warning(chat.id, user.id)
-        expiry_str = expiry.strftime("%d/%m/%Y %H:%M")
+        expiry_str = datetime.fromisoformat(expiry).strftime("%d/%m/%Y %H:%M")
         await update.message.reply_text(f"{user.first_name} ⚠ Warning ({warn_count}/3)")
 
         # Notify admins
@@ -201,21 +222,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning(f"Failed to mute {user.id}: {e}")
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "cancel_warn":
-        await safe_delete(query)
-        await safe_send_message(query.from_user.id, "⚠ Warning canceled by admin.")
-
 # ================= Run Bot =================
 async def run_bot():
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(CallbackQueryHandler(button, pattern="^done$"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    application.add_handler(CallbackQueryHandler(callback_handler))
-    
+
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
