@@ -1,28 +1,37 @@
-import logging
 import os
+import re
 import asyncio
+import logging
+from datetime import datetime, timedelta
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ChatPermissions, Bot
+)
 from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
+)
 from telegram.error import TelegramError
 
-# ==== Configuration ====
+# ================= Configuration =================
 TOKEN = os.getenv("TOKEN")
 CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
+ALLOWED_GROUP_ID = -1002810504524  # Only this group will auto-mute users
 
-# ==== Logging ====
+# ================= Logging =================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ==== Flask App ====
+# ================= Flask App =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -33,11 +42,32 @@ def home():
 def ping():
     return "OK"
 
-# ==== Bot Setup ====
+# ================= Bot Setup =================
 bot = Bot(TOKEN)
 application = ApplicationBuilder().bot(bot).build()
 
-# ==== Telegram Safe Functions ====
+# ================= Global Data =================
+warnings = {}  # {chat_id: {user_id: {"count": int, "expiry": datetime}}}
+url_pattern = re.compile(r"(https?://\S+|www\.\S+|t\.me/\S+)", re.IGNORECASE)
+
+# ================= Helper Functions =================
+def add_warning(chat_id: int, user_id: int):
+    chat_warns = warnings.setdefault(chat_id, {})
+    user_warn = chat_warns.get(user_id, {"count": 0, "expiry": datetime.now()})
+    
+    user_warn["count"] += 1
+    user_warn["expiry"] = datetime.now() + timedelta(days=1)
+    chat_warns[user_id] = user_warn
+    
+    return user_warn["count"], user_warn["expiry"]
+
+def clean_expired_warnings():
+    now = datetime.now()
+    for chat_id in list(warnings.keys()):
+        for user_id in list(warnings[chat_id].keys()):
+            if warnings[chat_id][user_id]["expiry"] < now:
+                del warnings[chat_id][user_id]
+
 async def safe_send_message(chat_id, text):
     try:
         await bot.send_message(chat_id=chat_id, text=text)
@@ -73,25 +103,6 @@ async def safe_delete(callback_query):
     except TelegramError as e:
         logger.warning(f"Delete message failed: {e}")
 
-# ==== Bot Handlers ====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_join_message(update, context)
-
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    if query.data == "done":
-        if await is_member_all(user_id):
-            await safe_delete(query)
-            await safe_send_sticker(user_id, STICKER_ID)
-            await safe_send_message(user_id, f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is ready!")
-            await safe_send_document(user_id, FILE_PATH)
-        else:
-            await safe_delete(query)
-            await send_join_message(update, context, query=True)
-
 async def is_member_all(user_id: int) -> bool:
     for ch in CHANNELS:
         try:
@@ -119,26 +130,100 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     else:
         await safe_send_photo(update.message, JOIN_IMAGE, caption, reply_markup)
 
-# ==== Run Bot in Polling Mode ====
+# ================= Handlers =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_join_message(update, context)
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    chat_id = update.effective_chat.id
+    if chat_id != ALLOWED_GROUP_ID:
+        return  # Optional: ignore button clicks in other groups
+
+    if query.data == "done":
+        if await is_member_all(user_id):
+            await safe_delete(query)
+            await safe_send_sticker(user_id, STICKER_ID)
+            await safe_send_message(user_id, f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is ready!")
+            await safe_send_document(user_id, FILE_PATH)
+        else:
+            await safe_delete(query)
+            await send_join_message(update, context, query=True)
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clean_expired_warnings()
+    
+    if not update.message:
+        return
+    
+    user = update.message.from_user
+    chat = update.effective_chat
+    text = update.message.text or ""
+    
+    # Skip admins
+    chat_admins = await chat.get_administrators()
+    admin_ids = [admin.user.id for admin in chat_admins]
+    if user.id in admin_ids:
+        return
+    
+    # Detect links or forwarded messages
+    if update.message.forward_from or url_pattern.search(text):
+        await update.message.delete()
+        warn_count, expiry = add_warning(chat.id, user.id)
+        expiry_str = expiry.strftime("%d/%m/%Y %H:%M")
+        await update.message.reply_text(f"{user.first_name} ⚠ Warning ({warn_count}/3)")
+
+        # Notify admins
+        for admin in chat_admins:
+            await safe_send_message(
+                admin.user.id,
+                f"@{user.username if user.username else user.first_name} [{user.id}] "
+                f"sent a {'forwarded message' if update.message.forward_from else '🔗 Link'} "
+                f"without authorization. Warn ({warn_count}/3) ❕ until {expiry_str}."
+            )
+
+        # Auto-mute on 3 warnings (only in your group)
+        if warn_count >= 3 and chat.id == ALLOWED_GROUP_ID:
+            try:
+                until_date = datetime.now() + timedelta(days=1)
+                await context.bot.restrict_chat_member(
+                    chat_id=chat.id,
+                    user_id=user.id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=until_date
+                )
+                await safe_send_message(
+                    chat.id,
+                    f"{user.first_name} has been muted for 1 day for reaching 3 warnings ⚠"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to mute {user.id}: {e}")
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "cancel_warn":
+        await safe_delete(query)
+        await safe_send_message(query.from_user.id, "⚠ Warning canceled by admin.")
+
+# ================= Run Bot =================
 async def run_bot():
-    try:
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    application.add_handler(CallbackQueryHandler(callback_handler))
+    
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    logger.info("Bot started ✅")
+    await asyncio.Event().wait()
 
-        # Initialize and start polling
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()  # <-- This handles all updates
-        logger.info("Bot started with polling ✅")
-
-        # Keep running
-        await asyncio.Event().wait()
-    except Exception as e:
-        logger.error(f"Bot crashed: {e}")
-        await asyncio.sleep(5)
-        await run_bot()
-
-# ==== Main Entry Point ====
+# ================= Main Entry Point =================
 async def main():
     bot_task = asyncio.create_task(run_bot())
 
