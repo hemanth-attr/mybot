@@ -15,6 +15,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 from telegram.error import TelegramError
+from urllib.parse import urlparse
 
 # ================= Configuration =================
 TOKEN = os.getenv("TOKEN")
@@ -25,6 +26,9 @@ STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJC
 PORT = int(os.environ.get("PORT", 10000))
 ALLOWED_GROUP_ID = -1002810504524
 WARNINGS_FILE = "warnings.json"
+
+# List of domains to allow without a warning
+ALLOWED_DOMAINS = ["plus-ui.blogspot.com", "plus-ul.blogspot.com", "fineshopdesign.com"]
 
 # ================= Logging =================
 logging.basicConfig(
@@ -118,7 +122,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ================= Done / Verified =================
     if query.data == "done":
         if await is_member_all(context, user_id):
-            # Answer the query with a small toast notification
             await query.answer("Download initiated!", show_alert=False)
             await query.delete_message()
             await context.bot.send_sticker(chat_id=user_id, sticker=STICKER_ID)
@@ -128,7 +131,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await context.bot.send_document(chat_id=user_id, document=FILE_PATH)
         else:
-            # Answer the query with a pop-up alert and re-send the join message
             await query.answer(
                 "⚠️ You must join all channels and groups to download the file.",
                 show_alert=True
@@ -142,28 +144,23 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = int(chat_id)
         user_id = int(user_id)
 
-        # Admin check
         chat_admins = await bot.get_chat_administrators(chat_id)
         admin_ids = [admin.user.id for admin in chat_admins]
         if query.from_user.id not in admin_ids:
-            # Show a pop-up alert for users who are not admins
             await query.answer(
                 "⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
                 show_alert=True
             )
             return
 
-        # Acknowledge the query for the admin who has permission
-        await query.answer("Warnings reset!")
+        await query.answer("Warnings reset successfully.")
 
-        # Reset warnings
         chat_id_str = str(chat_id)
         user_id_str = str(user_id)
         if chat_id_str in warnings and user_id_str in warnings[chat_id_str]:
             del warnings[chat_id_str][user_id_str]
             save_warnings()
 
-        # Remove mute if applied
         try:
             await bot.restrict_chat_member(
                 chat_id=chat_id,
@@ -198,35 +195,34 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = int(chat_id)
         user_id = int(user_id)
 
-        # Admin check
         chat_admins = await bot.get_chat_administrators(chat_id)
         admin_ids = [admin.user.id for admin in chat_admins]
         if query.from_user.id not in admin_ids:
-            # Show a pop-up alert for users who are not admins
             await query.answer(
                 "⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
                 show_alert=True
             )
             return
-        
-        # Acknowledge the query for the admin who has permission
-        await query.answer("User unmuted!")
 
-        # Remove mute
-        await bot.restrict_chat_member(
-            chat_id=chat_id,
-            user_id=user_id,
-            permissions=ChatPermissions(
-                can_send_messages=True,
-                can_send_media_messages=True,
-                can_send_polls=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True,
-                can_change_info=True,
-                can_invite_users=True,
-                can_pin_messages=True
+        await query.answer("User unmuted successfully.")
+
+        try:
+            await bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_media_messages=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                    can_change_info=True,
+                    can_invite_users=True,
+                    can_pin_messages=True
+                )
             )
-        )
+        except TelegramError:
+            pass
 
         current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
         await query.message.edit_text(
@@ -275,14 +271,34 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     text = update.message.text or ""
 
-    # Skip admins
-    chat_admins = await chat.get_administrators()
-    admin_ids = [admin.user.id for admin in chat_admins]
-    if user.id in admin_ids:
-        return
+    # Check if the message is a forward or contains a URL
+    if update.message.forward_from:
+        is_url_spam = True
+    else:
+        is_url_spam = False
+        # Regex to find all potential URLs
+        url_finder = re.compile(r"((?:https?://|www\.|t\.me/)\S+)", re.I)
+        found_urls = url_finder.findall(text)
 
-    # Detect links or forwards
-    if update.message.forward_from or re.search(r"(https?://\S+|www\.\S+|t\.me/\S+)", text, re.I):
+        for url in found_urls:
+            try:
+                # Remove protocol/www. and convert to lowercase for consistent checking
+                parsed_url = urlparse(url)
+                domain = parsed_url.netloc.lower().replace("www.", "")
+                # If no domain is parsed, it might be a t.me link.
+                if not domain:
+                    domain = parsed_url.path.split('/')[0].lower() if parsed_url.path else ''
+
+                # Check if the domain is NOT in the allowed list
+                if domain not in [d.lower() for d in ALLOWED_DOMAINS]:
+                    is_url_spam = True
+                    break
+            except Exception:
+                is_url_spam = True # Assume it's spam if parsing fails
+                break
+
+    # If it's a forward or a non-allowed URL, apply the warning logic
+    if is_url_spam:
         try:
             await update.message.delete()
         except Exception:
