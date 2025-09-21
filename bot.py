@@ -18,8 +18,10 @@ from telegram.error import TelegramError
 
 # ================= Configuration =================
 TOKEN = os.getenv("TOKEN")
+CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
+STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
 ALLOWED_GROUP_ID = -1002810504524
 WARNINGS_FILE = "warnings.json"
@@ -106,18 +108,33 @@ async def safe_delete(callback_query):
 
 # ================= Handlers =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await safe_send_message(update.effective_chat.id, "👋 Welcome! Please follow the instructions.")
+    await send_join_message(update, context)
 
 # ================= Button Handler =================
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # await query.answer()
+    user_id = query.from_user.id
 
     # ================= Done / Verified =================
     if query.data == "done":
-        user_id = query.from_user.id
-        await safe_send_message(user_id, "✨ Verified! Your theme is ready.")
-        await safe_send_document(user_id, FILE_PATH)
+        if await is_member_all(context, user_id):
+            # Answer the query with a small toast notification
+            await query.answer("Download initiated!", show_alert=False)
+            await query.delete_message()
+            await context.bot.send_sticker(chat_id=user_id, sticker=STICKER_ID)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is now ready..."
+            )
+            await context.bot.send_document(chat_id=user_id, document=FILE_PATH)
+        else:
+            # Answer the query with a pop-up alert and re-send the join message
+            await query.answer(
+                "⚠️ You must join all channels and groups to download the file.",
+                show_alert=True
+            )
+            await query.delete_message()
+            await send_join_message(update, context, query=True)
 
     # ================= Cancel Warn =================
     elif query.data.startswith("cancel_warn"):
@@ -129,11 +146,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_admins = await bot.get_chat_administrators(chat_id)
         admin_ids = [admin.user.id for admin in chat_admins]
         if query.from_user.id not in admin_ids:
-            return await query.answer(
+            # Show a pop-up alert for users who are not admins
+            await query.answer(
                 "⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
                 show_alert=True
             )
             return
+
+        # Acknowledge the query for the admin who has permission
+        await query.answer("Warnings reset!")
 
         # Reset warnings
         chat_id_str = str(chat_id)
@@ -181,11 +202,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_admins = await bot.get_chat_administrators(chat_id)
         admin_ids = [admin.user.id for admin in chat_admins]
         if query.from_user.id not in admin_ids:
+            # Show a pop-up alert for users who are not admins
             await query.answer(
                 "⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
                 show_alert=True
             )
             return
+        
+        # Acknowledge the query for the admin who has permission
+        await query.answer("User unmuted!")
 
         # Remove mute
         await bot.restrict_chat_member(
@@ -213,6 +238,33 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         )
 
+# ================= Start Func =================
+async def is_member_all(context, user_id: int) -> bool:
+    for ch in CHANNELS:
+        try:
+            member = await context.bot.get_chat_member(ch, user_id)
+            if member.status not in ["member", "administrator", "creator"]:
+                return False
+        except Exception as e:
+            logger.error(f"Error checking {ch}: {e}")
+            return False
+    return True
+
+async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, query=False):
+    keyboard = [
+        [
+            InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
+            InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{CHANNELS[1].strip('@')}")
+        ],
+        [InlineKeyboardButton("✅ Done!!!", callback_data="done")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    caption = "💡 Join All Channels & Groups To Download the Latest Plus UI Blogger Template !!!\nAfter joining, press ✅ Done!!!"
+
+    if query:
+        await update.callback_query.message.reply_photo(photo=JOIN_IMAGE, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_photo(photo=JOIN_IMAGE, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 # ================= Message Handler =================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_expired_warnings()
