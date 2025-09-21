@@ -19,7 +19,7 @@ from telegram.error import TelegramError
 TOKEN = os.getenv("TOKEN")
 CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
-FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
+FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0-Updated.zip"
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
 ALLOWED_GROUP_ID = -1002810504524  # Only this group will auto-mute users
@@ -74,18 +74,6 @@ async def safe_send_message(chat_id, text):
     except TelegramError as e:
         logger.warning(f"Send message failed to {chat_id}: {e}")
 
-async def safe_send_document(chat_id, document):
-    try:
-        await bot.send_document(chat_id=chat_id, document=document)
-    except TelegramError as e:
-        logger.warning(f"Send document failed to {chat_id}: {e}")
-
-async def safe_send_sticker(chat_id, sticker):
-    try:
-        await bot.send_sticker(chat_id=chat_id, sticker=sticker)
-    except TelegramError as e:
-        logger.warning(f"Send sticker failed to {chat_id}: {e}")
-
 async def safe_send_photo(message_obj, photo, caption, reply_markup):
     try:
         await message_obj.reply_photo(
@@ -139,16 +127,27 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
 
-    chat_id = update.effective_chat.id
-    if chat_id != ALLOWED_GROUP_ID:
-        return  # Optional: ignore button clicks in other groups
-
     if query.data == "done":
         if await is_member_all(user_id):
             await safe_delete(query)
-            await safe_send_sticker(user_id, STICKER_ID)
-            await safe_send_message(user_id, f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is ready!")
-            await safe_send_document(user_id, FILE_PATH)
+
+            # Send sticker as reply
+            try:
+                await query.message.reply_sticker(STICKER_ID)
+            except TelegramError as e:
+                logger.warning(f"Failed to send sticker: {e}")
+
+            # Send greeting
+            await query.message.reply_text(f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is ready!")
+
+            # Send file as reply
+            try:
+                await query.message.reply_document(
+                    document=FILE_PATH,
+                    filename="Plus-Ui-3.2.0-Updated.zip"
+                )
+            except TelegramError as e:
+                logger.warning(f"Failed to send document: {e}")
         else:
             await safe_delete(query)
             await send_join_message(update, context, query=True)
