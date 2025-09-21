@@ -111,7 +111,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= Button Handler =================
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    # await query.answer()
 
     # ================= Done / Verified =================
     if query.data == "done":
@@ -129,8 +129,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_admins = await bot.get_chat_administrators(chat_id)
         admin_ids = [admin.user.id for admin in chat_admins]
         if query.from_user.id not in admin_ids:
-            await query.answer(
-                "Blogger Templates\n⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
+            return await query.answer(
+                "⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
                 show_alert=True
             )
             return
