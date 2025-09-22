@@ -137,7 +137,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await query.delete_message()
             await send_join_message(update, context, query=True)
-
+            
     # ================= Cancel Warn =================
     elif query.data.startswith("cancel_warn"):
         _, chat_id, user_id = query.data.split(":")
@@ -178,10 +178,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except TelegramError:
             pass
+        
+        # Corrected user display logic
+        if query.from_user.username:
+            user_display = f"@{query.from_user.username}"
+        else:
+            user_display = f"{query.from_user.first_name}"
 
         current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
         await query.message.edit_text(
-            f"✅ @{query.from_user.username}'s warnings have been reset!\n"
+            f"✅ {user_display}'s warnings have been reset!\n"
             f"• Action: Warns (0/3)\n"
             f"• Reset on: {current_time}",
             reply_markup=InlineKeyboardMarkup(
@@ -224,9 +230,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             pass
 
+        # Corrected user display logic
+        if query.from_user.username:
+            user_display = f"@{query.from_user.username}"
+        else:
+            user_display = f"{query.from_user.first_name}"
+        
         current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
         await query.message.edit_text(
-            f"🔊 @{query.from_user.username} has been unmuted!\n"
+            f"🔊 {user_display} has been unmuted!\n"
             f"• Action: Unmuted\n"
             f"• Time: {current_time}",
             reply_markup=InlineKeyboardMarkup(
@@ -261,6 +273,7 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.callback_query.message.reply_photo(photo=JOIN_IMAGE, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
     else:
         await update.message.reply_photo(photo=JOIN_IMAGE, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
 # ================= Message Handler =================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_expired_warnings()
@@ -271,30 +284,38 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     text = update.message.text or ""
 
+    # Skip admins
+    chat_admins = await chat.get_administrators()
+    admin_ids = [admin.user.id for admin in chat_admins]
+    if user.id in admin_ids:
+        return
+
     # Check if the message is a forward or contains a URL
-    if update.message.forward_from:
-        is_url_spam = True
-    else:
-        is_url_spam = False
+    is_url_spam = update.message.forward_from is not None
+
+    if not is_url_spam:
         # Regex to find all potential URLs
         url_finder = re.compile(r"((?:https?://|www\.|t\.me/)\S+)", re.I)
         found_urls = url_finder.findall(text)
 
         for url in found_urls:
             try:
-                # Remove protocol/www. and convert to lowercase for consistent checking
+                # Use urlparse to break down the URL
                 parsed_url = urlparse(url)
                 domain = parsed_url.netloc.lower().replace("www.", "")
-                # If no domain is parsed, it might be a t.me link.
-                if not domain:
-                    domain = parsed_url.path.split('/')[0].lower() if parsed_url.path else ''
+                
+                # Special handling for t.me links since they might not have a netloc
+                if not domain and parsed_url.path:
+                    # Extracts 'channel_name' from 't.me/channel_name'
+                    domain = parsed_url.path.strip('/').split('/')[0].lower()
 
                 # Check if the domain is NOT in the allowed list
                 if domain not in [d.lower() for d in ALLOWED_DOMAINS]:
                     is_url_spam = True
                     break
             except Exception:
-                is_url_spam = True # Assume it's spam if parsing fails
+                # Assume it's spam if parsing fails
+                is_url_spam = True
                 break
 
     # If it's a forward or a non-allowed URL, apply the warning logic
@@ -307,24 +328,30 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         warn_count, expiry = add_warning(chat.id, user.id)
         expiry_str = datetime.fromisoformat(expiry).strftime("%d/%m/%Y %H:%M")
 
+        # Corrected user display logic
+        if user.username:
+            user_display = f"@{user.username}"
+        else:
+            user_display = f"{user.first_name}"
+
         # Format messages exactly like your requested template
         if warn_count == 1:
             caption = (
-                f"@{user.username if user.username else user.first_name} [{user.id}] sent a spam message.\n"
+                f"{user_display} [{user.id}] sent a spam message.\n"
                 f"Action: Warn (1/3) ❕ until {expiry_str}."
             )
             keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
 
         elif warn_count == 2:
             caption = (
-                f"@{user.username if user.username else user.first_name} [{user.id}] sent a spam message.\n"
+                f"{user_display} [{user.id}] sent a spam message.\n"
                 f"Action: Warn (2/3) ❗ until {expiry_str}."
             )
             keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
 
-        else:  # Final warn (3/3)
+        else:
             caption = (
-                f"@{user.username if user.username else user.first_name} [{user.id}] sent a spam message.\n"
+                f"{user_display} [{user.id}] sent a spam message.\n"
                 f"• Warns now: (3/3) ❕ until {expiry_str}.\n"
                 f"• Action: Muted 🔇"
             )
@@ -339,7 +366,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML
         )
 
-        # Auto-mute if 3 warnings
         if warn_count >= 3 and chat.id == ALLOWED_GROUP_ID:
             until_date = datetime.now() + timedelta(days=1)
             await context.bot.restrict_chat_member(
@@ -348,7 +374,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=until_date
             )
-
+            
 # ================= Run Bot =================
 async def run_bot():
     application.add_handler(CommandHandler("start", start))
