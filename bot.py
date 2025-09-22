@@ -195,7 +195,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Action: Warns (0/3)\n"
             f"• Reset on: {current_time}",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{user.id}")]]
+                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{query.from_user.id}")]]
             )
         )
 
@@ -246,7 +246,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Action: Unmuted\n"
             f"• Time: {current_time}",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{user.id}")]]
+                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{query.from_user.id}")]]
             )
         )
 
@@ -265,7 +265,7 @@ async def is_member_all(context, user_id: int) -> bool:
 async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, query=False):
     keyboard = [
         [
-            InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
+            InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
             InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{CHANNELS[1].strip('@')}")
         ],
         [InlineKeyboardButton("✅ Done!!!", callback_data="done")]
