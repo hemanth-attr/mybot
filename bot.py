@@ -121,10 +121,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= Button Handler =================
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = query.from_user.id
-
+    
     # ================= Done / Verified =================
     if query.data == "done":
+        user_id = query.from_user.id
         if await is_member_all(context, user_id):
             await query.answer("Download initiated!", show_alert=False)
             await query.delete_message()
@@ -144,9 +144,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     # ================= Cancel Warn =================
     elif query.data.startswith("cancel_warn"):
-        _, chat_id, user_id = query.data.split(":")
+        _, chat_id, target_user_id = query.data.split(":")
         chat_id = int(chat_id)
-        user_id = int(user_id)
+        target_user_id = int(target_user_id)
 
         chat_admins = await bot.get_chat_administrators(chat_id)
         admin_ids = [admin.user.id for admin in chat_admins]
@@ -160,15 +160,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Warnings reset successfully.")
 
         chat_id_str = str(chat_id)
-        user_id_str = str(user_id)
-        if chat_id_str in warnings and user_id_str in warnings[chat_id_str]:
-            del warnings[chat_id_str][user_id_str]
+        target_user_id_str = str(target_user_id)
+        if chat_id_str in warnings and target_user_id_str in warnings[chat_id_str]:
+            del warnings[chat_id_str][target_user_id_str]
             save_warnings()
 
         try:
             await bot.restrict_chat_member(
                 chat_id=chat_id,
-                user_id=user_id,
+                user_id=target_user_id,
                 permissions=ChatPermissions(
                     can_send_messages=True,
                     can_send_media_messages=True,
@@ -183,11 +183,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             pass
         
-        # Corrected user display logic
-        if query.from_user.username:
-            user_display = f"@{query.from_user.username}"
+        # FIX: Get the target user's details
+        target_user = await context.bot.get_chat_member(chat_id, target_user_id)
+        if target_user.user.username:
+            user_display = f"@{target_user.user.username}"
         else:
-            user_display = f"{query.from_user.first_name}"
+            user_display = f"{target_user.user.first_name}"
 
         current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
         await query.message.edit_text(
@@ -195,15 +196,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Action: Warns (0/3)\n"
             f"• Reset on: {current_time}",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{query.from_user.id}")]]
+                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{target_user_id}")]]
             )
         )
 
     # ================= Unmute =================
     elif query.data.startswith("unmute"):
-        _, chat_id, user_id = query.data.split(":")
+        _, chat_id, target_user_id = query.data.split(":")
         chat_id = int(chat_id)
-        user_id = int(user_id)
+        target_user_id = int(target_user_id)
 
         chat_admins = await bot.get_chat_administrators(chat_id)
         admin_ids = [admin.user.id for admin in chat_admins]
@@ -219,7 +220,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await bot.restrict_chat_member(
                 chat_id=chat_id,
-                user_id=user_id,
+                user_id=target_user_id,
                 permissions=ChatPermissions(
                     can_send_messages=True,
                     can_send_media_messages=True,
@@ -234,11 +235,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             pass
 
-        # Corrected user display logic
-        if query.from_user.username:
-            user_display = f"@{query.from_user.username}"
+        # FIX: Get the target user's details
+        target_user = await context.bot.get_chat_member(chat_id, target_user_id)
+        if target_user.user.username:
+            user_display = f"@{target_user.user.username}"
         else:
-            user_display = f"{query.from_user.first_name}"
+            user_display = f"{target_user.user.first_name}"
         
         current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
         await query.message.edit_text(
@@ -246,7 +248,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Action: Unmuted\n"
             f"• Time: {current_time}",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{query.from_user.id}")]]
+                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{target_user_id}")]]
             )
         )
 
