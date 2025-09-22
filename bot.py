@@ -3,6 +3,7 @@ import re
 import json
 import asyncio
 import logging
+import html
 from datetime import datetime, timedelta
 from flask import Flask
 from telegram import (
@@ -26,6 +27,9 @@ STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJC
 PORT = int(os.environ.get("PORT", 10000))
 ALLOWED_GROUP_ID = -1002810504524
 WARNINGS_FILE = "warnings.json"
+
+# Toggle the username requirement feature
+USERNAME_REQUIRED = True
 
 # List of domains to allow without a warning
 ALLOWED_DOMAINS = ["plus-ui.blogspot.com", "plus-ul.blogspot.com", "fineshopdesign.com"]
@@ -191,7 +195,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Action: Warns (0/3)\n"
             f"• Reset on: {current_time}",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{user_id}")]]
+                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{user.id}")]]
             )
         )
 
@@ -242,7 +246,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Action: Unmuted\n"
             f"• Time: {current_time}",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{user_id}")]]
+                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{user.id}")]]
             )
         )
 
@@ -277,7 +281,7 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 # ================= Message Handler =================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_expired_warnings()
-    if not update.message:
+    if not update.message or not update.message.text:
         return
 
     user = update.message.from_user
@@ -290,35 +294,27 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id in admin_ids:
         return
 
-    # Check if the message is a forward or contains a URL
+    # Check if the message is spam
     is_url_spam = update.message.forward_from is not None
-
     if not is_url_spam:
-        # Regex to find all potential URLs
         url_finder = re.compile(r"((?:https?://|www\.|t\.me/)\S+)", re.I)
         found_urls = url_finder.findall(text)
 
         for url in found_urls:
             try:
-                # Use urlparse to break down the URL
                 parsed_url = urlparse(url)
                 domain = parsed_url.netloc.lower().replace("www.", "")
                 
-                # Special handling for t.me links since they might not have a netloc
                 if not domain and parsed_url.path:
-                    # Extracts 'channel_name' from 't.me/channel_name'
                     domain = parsed_url.path.strip('/').split('/')[0].lower()
 
-                # Check if the domain is NOT in the allowed list
                 if domain not in [d.lower() for d in ALLOWED_DOMAINS]:
                     is_url_spam = True
                     break
             except Exception:
-                # Assume it's spam if parsing fails
                 is_url_spam = True
                 break
 
-    # If it's a forward or a non-allowed URL, apply the warning logic
     if is_url_spam:
         try:
             await update.message.delete()
@@ -327,28 +323,25 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         warn_count, expiry = add_warning(chat.id, user.id)
         expiry_str = datetime.fromisoformat(expiry).strftime("%d/%m/%Y %H:%M")
-
-        # Corrected user display logic
+        
         if user.username:
             user_display = f"@{user.username}"
         else:
-            user_display = f"{user.first_name}"
-
-        # Format messages exactly like your requested template
+            clickable_name = f"<a href='tg://user?id={user.id}'>{html.escape(user.first_name)}</a>"
+            user_display = clickable_name
+            
         if warn_count == 1:
             caption = (
                 f"{user_display} [{user.id}] sent a spam message.\n"
                 f"Action: Warn (1/3) ❕ until {expiry_str}."
             )
             keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
-
         elif warn_count == 2:
             caption = (
                 f"{user_display} [{user.id}] sent a spam message.\n"
                 f"Action: Warn (2/3) ❗ until {expiry_str}."
             )
             keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
-
         else:
             caption = (
                 f"{user_display} [{user.id}] sent a spam message.\n"
@@ -358,14 +351,55 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{user.id}")]]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-
         await bot.send_message(
             chat_id=chat.id,
             text=caption,
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
-
+        if warn_count >= 3 and chat.id == ALLOWED_GROUP_ID:
+            until_date = datetime.now() + timedelta(days=1)
+            await context.bot.restrict_chat_member(
+                chat_id=chat.id,
+                user_id=user.id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_date
+            )
+    
+    elif USERNAME_REQUIRED and not user.username:
+        warn_count, expiry = add_warning(chat.id, user.id)
+        
+        clickable_name = f"<a href='tg://user?id={user.id}'>{html.escape(user.first_name)}</a>"
+        
+        if warn_count == 1:
+            caption = (
+                f"{clickable_name} [{user.id}] In order to be accepted in the group, "
+                f"please set up a username.\n"
+                f"Action: Warn (1/3) ❕"
+            )
+        elif warn_count == 2:
+            caption = (
+                f"{clickable_name} [{user.id}] In order to be accepted in the group, "
+                f"please set up a username.\n"
+                f"Action: Warn (2/3) ❗"
+            )
+        else:
+            caption = (
+                f"{clickable_name} [{user.id}] In order to be accepted in the group, "
+                f"please set up a username.\n"
+                f"• Warns now: (3/3) ❕\n"
+                f"• Action: Muted 🔇"
+            )
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            caption,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML
+        )
+        
         if warn_count >= 3 and chat.id == ALLOWED_GROUP_ID:
             until_date = datetime.now() + timedelta(days=1)
             await context.bot.restrict_chat_member(
@@ -375,11 +409,38 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 until_date=until_date
             )
             
+# ================= Bot Status Updates Handler =================
+async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.new_chat_members:
+        for member in update.message.new_chat_members:
+            if member.is_bot:
+                try:
+                    await context.bot.kick_chat_member(update.message.chat_id, member.id)
+                    await update.message.delete()
+                    logger.info(f"Kicked bot {member.id} from group {update.message.chat_id}.")
+                except TelegramError as e:
+                    logger.warning(f"Could not kick bot {member.id}: {e}")
+            else:
+                try:
+                    await update.message.delete()
+                except TelegramError as e:
+                    logger.warning(f"Could not delete 'user joined' message: {e}")
+    
+    elif update.message.left_chat_member:
+        try:
+            await update.message.delete()
+        except TelegramError as e:
+            logger.warning(f"Could not delete 'user left' message: {e}")
+
 # ================= Run Bot =================
 async def run_bot():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*)$"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    application.add_handler(MessageHandler(
+        filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
+        handle_status_updates
+    ))
 
     await application.initialize()
     await application.start()
