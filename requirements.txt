@@ -1,5 +1,5 @@
 Flask==2.3.3
 python-telegram-bot==20.3
-hypercorn==1.1.1
+hypercorn
 pandas==2.1.1
 scikit-learn==1.3.2
