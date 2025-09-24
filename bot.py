@@ -199,9 +199,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, chat_id, target_user_id = query.data.split(":")
         chat_id = int(chat_id)
         target_user_id = int(target_user_id)
+        
+        # Check if the user is an admin
+        try:
+            chat_admins = await bot.get_chat_administrators(chat_id)
+            admin_ids = [admin.user.id for admin in chat_admins]
+        except TelegramError:
+            admin_ids = []
 
-        chat_admins = await bot.get_chat_administrators(chat_id)
-        admin_ids = [admin.user.id for admin in chat_admins]
         if query.from_user.id not in admin_ids:
             await query.answer(
                 "⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
@@ -209,43 +214,51 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await query.answer("Warnings reset successfully.")
-
+        # Check the user's current warn count before resetting
         chat_id_str = str(chat_id)
         target_user_id_str = str(target_user_id)
+        
+        warns_cleared = 0
+        if chat_id_str in warnings and target_user_id_str in warnings[chat_id_str]:
+            warns_cleared = warnings[chat_id_str][target_user_id_str]["count"]
+
+        # Reset the user's warnings in the database
         if chat_id_str in warnings and target_user_id_str in warnings[chat_id_str]:
             del warnings[chat_id_str][target_user_id_str]
             save_warnings()
 
+        # Acknowledge the button press with a dynamic message
+        if warns_cleared > 0:
+            await query.answer(f"Warnings ({warns_cleared}/3) reset successfully.")
+        else:
+            await query.answer("Warnings already reset.")
+
+        # Get user info and format the confirmation message
+        target_user = await context.bot.get_chat_member(chat_id, target_user_id)
+        user_display = f"@{target_user.user.username}" if target_user.user.username else f"{target_user.user.first_name}"
+        current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
+        
+        confirmation_text = (
+            f"✅ <b>{user_display}'s</b> warnings have been reset!\n"
+            f"• Action: Warnings reset ({warns_cleared}/3)\n"
+            f"• Reset on: <code>{current_time}</code>"
+        )
+
+        # Use a try-except block to handle cases where the message is already deleted
         try:
-            await bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=target_user_id,
-                permissions=ChatPermissions(
-                    can_send_messages=True, can_send_media_messages=True,
-                    can_send_polls=True, can_send_other_messages=True,
-                    can_add_web_page_previews=True, can_change_info=True,
-                    can_invite_users=True, can_pin_messages=True
-                )
+            # Try to edit the original message to show the update
+            await query.message.edit_text(
+                confirmation_text,
+                reply_markup=None, # Remove the button from the confirmation message
+                parse_mode=ParseMode.HTML
             )
         except TelegramError:
-            pass
-        
-        target_user = await context.bot.get_chat_member(chat_id, target_user_id)
-        if target_user.user.username:
-            user_display = f"@{target_user.user.username}"
-        else:
-            user_display = f"{target_user.user.first_name}"
-
-        current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
-        await query.message.edit_text(
-            f"✅ {user_display}'s warnings have been reset!\n"
-            f"• Action: Warns (0/3)\n"
-            f"• Reset on: {current_time}",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{target_user_id}")]]
+            # If editing fails, send a new confirmation message instead
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=confirmation_text,
+                parse_mode=ParseMode.HTML
             )
-        )
 
     # ================= Unmute =================
     elif query.data.startswith("unmute"):
@@ -253,8 +266,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = int(chat_id)
         target_user_id = int(target_user_id)
 
-        chat_admins = await bot.get_chat_administrators(chat_id)
-        admin_ids = [admin.user.id for admin in chat_admins]
+        try:
+            chat_admins = await bot.get_chat_administrators(chat_id)
+            admin_ids = [admin.user.id for admin in chat_admins]
+        except TelegramError:
+            admin_ids = []
+
         if query.from_user.id not in admin_ids:
             await query.answer(
                 "⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
@@ -262,8 +279,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # Acknowledge the button press
         await query.answer("User unmuted successfully.")
 
+        # Correctly un-restrict the user's permissions
         try:
             await bot.restrict_chat_member(
                 chat_id=chat_id,
@@ -278,21 +297,36 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             pass
 
+        # === FIX: Clear warnings on unmute ===
+        chat_id_str = str(chat_id)
+        target_user_id_str = str(target_user_id)
+        if chat_id_str in warnings and target_user_id_str in warnings[chat_id_str]:
+            del warnings[chat_id_str][target_user_id_str]
+            save_warnings()
+            
         target_user = await context.bot.get_chat_member(chat_id, target_user_id)
-        if target_user.user.username:
-            user_display = f"@{target_user.user.username}"
-        else:
-            user_display = f"{target_user.user.first_name}"
+        user_display = f"@{target_user.user.username}" if target_user.user.username else f"{target_user.user.first_name}"
         
         current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
-        await query.message.edit_text(
-            f"🔊 {user_display} has been unmuted!\n"
+        confirmation_text = (
+            f"🔊 <b>{user_display}</b> has been unmuted!\n"
             f"• Action: Unmuted\n"
-            f"• Time: {current_time}",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{target_user_id}")]]
-            )
+            f"• Time: <code>{current_time}</code>"
         )
+
+        # Use a try-except block to handle cases where the message is already deleted
+        try:
+            await query.message.edit_text(
+                confirmation_text,
+                reply_markup=None,
+                parse_mode=ParseMode.HTML
+            )
+        except TelegramError:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=confirmation_text,
+                parse_mode=ParseMode.HTML
+            )
 
 async def is_member_all(context, user_id: int) -> bool:
     for ch in CHANNELS:
@@ -321,7 +355,6 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     else:
         await update.message.reply_photo(photo=JOIN_IMAGE, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
-
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_expired_warnings()
     if not update.message or not update.message.text:
@@ -336,8 +369,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     # Skip admins
-    chat_admins = await chat.get_administrators()
-    admin_ids = [admin.user.id for admin in chat_admins]
+    try:
+        chat_admins = await chat.get_administrators()
+        admin_ids = [admin.user.id for admin in chat_admins]
+    except TelegramError:
+        admin_ids = []
+
     if user.id in admin_ids:
         return
 
@@ -345,7 +382,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async def handle_spam(reason_text: str):
         try:
             await update.message.delete()
-        except Exception:
+        except TelegramError:
             pass
         
         warn_count, expiry = add_warning(chat.id, user.id)
@@ -362,13 +399,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if warn_count <= 2:
             caption = (
-                f"{user_display} [{user.id}] {reason_text}.\n"
+                f"{user_display} [<code>{user.id}</code>] {reason_text}.\n"
                 f"Action: Warn ({warn_count}/3) ❕ until {expiry_str}."
             )
             keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
         else:
             caption = (
-                f"{user_display} [{user.id}] has exceeded the warning limit.\n"
+                f"{user_display} [<code>{user.id}</code>] has exceeded the warning limit.\n"
                 f"Action: Muted ({warn_count}/3) 🔇 until {expiry_str}."
             )
             keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{user.id}")]]
