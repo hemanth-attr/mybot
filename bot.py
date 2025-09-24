@@ -4,7 +4,7 @@ import json
 import asyncio
 import logging
 import html
-import pandas as pd
+import joblib
 from datetime import datetime, timedelta
 from flask import Flask
 from telegram import (
@@ -18,10 +18,6 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 from urllib.parse import urlparse
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.naive_bayes import MultinomialNB
-from sklearn.model_selection import train_test_split
-from typing import Set
 
 # ================= Configuration =================
 TOKEN = os.getenv("TOKEN")
@@ -312,7 +308,7 @@ async def is_member_all(context, user_id: int) -> bool:
 async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, query=False):
     keyboard = [
         [
-            InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
+            InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
             InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{CHANNELS[1].strip('@')}")
         ],
         [InlineKeyboardButton("✅ Done!!!", callback_data="done")]
@@ -446,23 +442,13 @@ async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TY
 async def run_bot():
     global ML_MODEL, TFIDF_VECTORIZER
     
-    # Load and train the ML model at startup
+    # Load the pre-trained ML model and vectorizer from disk
     try:
-        df = pd.read_csv("https://raw.githubusercontent.com/hemanth-attr/mybot/refs/heads/main/data/sms.csv", encoding="latin-1")
-        df = df.drop(columns=['Unnamed: 2', 'Unnamed: 3', 'Unnamed: 4'], axis=1)
-        df.rename(columns={'v1': 'label', 'v2': 'text'}, inplace=True)
-        df['label'] = df['label'].map({'ham': 0, 'spam': 1})
-        
-        X_train, X_test, y_train, y_test = train_test_split(df['text'], df['label'], test_size=0.2, random_state=42)
-        
-        TFIDF_VECTORIZER = TfidfVectorizer(stop_words='english')
-        X_train_tfidf = TFIDF_VECTORIZER.fit_transform(X_train)
-        
-        ML_MODEL = MultinomialNB()
-        ML_MODEL.fit(X_train_tfidf, y_train)
-        logger.info("ML model loaded and trained successfully.")
+        TFIDF_VECTORIZER = joblib.load('vectorizer.joblib')
+        ML_MODEL = joblib.load('model.joblib')
+        logger.info("ML model loaded successfully from disk.")
     except Exception as e:
-        logger.error(f"Failed to load or train ML model: {e}")
+        logger.error(f"Failed to load ML model: {e}")
         logger.warning("Bot will operate in rule-based mode only.")
         ML_MODEL = None
         TFIDF_VECTORIZER = None
