@@ -4,19 +4,24 @@ import json
 import asyncio
 import logging
 import html
+import pandas as pd
 from datetime import datetime, timedelta
 from flask import Flask
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ChatPermissions, Bot
+    ChatPermissions, Bot, MessageEntity
 )
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatType
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
 from telegram.error import TelegramError
 from urllib.parse import urlparse
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.model_selection import train_test_split
+from typing import Set
 
 # ================= Configuration =================
 TOKEN = os.getenv("TOKEN")
@@ -29,10 +34,21 @@ ALLOWED_GROUP_ID = -1002810504524
 WARNINGS_FILE = "warnings.json"
 
 # Toggle the username requirement feature
-USERNAME_REQUIRED = True
+USERNAME_REQUIRED = False
+
+# === New Feature: URL Blocking Control ===
+# Set to True to block all URLs not in ALLOWED_DOMAINS.
+# Set to False to only block t.me links.
+BLOCK_ALL_URLS = False
 
 # List of domains to allow without a warning
 ALLOWED_DOMAINS = ["plus-ui.blogspot.com", "plus-ul.blogspot.com", "fineshopdesign.com"]
+
+# ================= Global Variables for ML Model =================
+ML_MODEL = None
+TFIDF_VECTORIZER = None
+SPAM_KEYWORDS = {"free", "lottery", "click here", "subscribe", "win", "claim", "money", "deal"}
+SPAM_EMOJIS = {"😀", "😂", "🔥", "💯", "😍", "❤️", "🥳", "🎉", "💰", "💵", "🤑"}
 
 # ================= Logging =================
 logging.basicConfig(
@@ -40,21 +56,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# ================= Flask App =================
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Bot is alive ✅"
-
-@app.route("/ping")
-def ping():
-    return "OK"
-
-# ================= Bot Setup =================
-bot = Bot(TOKEN)
-application = ApplicationBuilder().bot(bot).build()
 
 # ================= Warnings =================
 def load_warnings():
@@ -89,36 +90,88 @@ def clean_expired_warnings():
                 del warnings[chat_id][user_id]
     save_warnings()
 
-# ================= Safe Send =================
-async def safe_send_message(chat_id, text):
-    try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
-    except TelegramError as e:
-        logger.warning(f"Send message failed to {chat_id}: {e}")
+# ================= Spam Detection Functions =================
+def rule_check(message_text: str) -> (bool, str):
+    """Checks for obvious spam patterns using simple rules."""
+    text_lower = message_text.lower()
 
-async def safe_send_document(chat_id, document):
-    try:
-        await bot.send_document(chat_id=chat_id, document=document)
-    except TelegramError as e:
-        logger.warning(f"Send document failed to {chat_id}: {e}")
+    # Rule 1: Always block t.me links
+    if "t.me/" in text_lower:
+        return True, "Promotion not allowed!"
 
-async def safe_send_sticker(chat_id, sticker):
-    try:
-        await bot.send_sticker(chat_id=chat_id, sticker=sticker)
-    except TelegramError as e:
-        logger.warning(f"Send sticker failed to {chat_id}: {e}")
+    # Rule 2: Block all other URLs if BLOCK_ALL_URLS is enabled
+    if BLOCK_ALL_URLS:
+        url_finder = re.compile(r"((?:https?://|www\.|t\.me/)\S+)", re.I)
+        found_urls = url_finder.findall(text_lower)
+        for url in found_urls:
+            try:
+                parsed_url = urlparse(url)
+                domain = parsed_url.netloc.lower().replace("www.", "")
+                if not domain and parsed_url.path:
+                    domain = parsed_url.path.strip('/').split('/')[0].lower()
 
-async def safe_delete(callback_query):
-    try:
-        await callback_query.delete_message()
-    except TelegramError as e:
-        logger.warning(f"Delete message failed: {e}")
+                if domain not in [d.lower() for d in ALLOWED_DOMAINS]:
+                    return True, "has sent a Link without authorization"
+            except Exception:
+                return True, "has sent a malformed URL"
+
+    # Rule 3: Excessive emojis
+    if sum(c in SPAM_EMOJIS for c in message_text) > 5:
+        return True, "sent excessive emojis"
+
+    # Rule 4: Suspicious keywords
+    if any(word in text_lower for word in SPAM_KEYWORDS):
+        return True, "sent suspicious keywords"
+
+    # Rule 5: Unusually long messages
+    if len(message_text) > 500:
+        return True, "sent an unusually long message"
+    
+    return False, None
+
+def ml_check(message_text: str) -> bool:
+    """Uses a trained ML model to detect tricky spam."""
+    if ML_MODEL and TFIDF_VECTORIZER:
+        processed_text = TFIDF_VECTORIZER.transform([message_text])
+        prediction = ML_MODEL.predict(processed_text)[0]
+        return prediction == 1
+    return False
+
+def is_spam(message_text: str) -> (bool, str):
+    """Hybrid spam detection combining rules and ML."""
+    if not message_text:
+        return False, None
+
+    # Layer 1: Rule-based check
+    is_rule_spam, reason = rule_check(message_text)
+    if is_rule_spam:
+        return True, reason
+
+    # Layer 2: Machine learning check
+    if ml_check(message_text):
+        return True, "sent a spam message"
+        
+    return False, None
+
+# ================= Flask App =================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is alive ✅"
+
+@app.route("/ping")
+def ping():
+    return "OK"
+
+# ================= Bot Setup =================
+bot = Bot(TOKEN)
+application = ApplicationBuilder().bot(bot).build()
 
 # ================= Handlers =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_join_message(update, context)
 
-# ================= Button Handler =================
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     
@@ -170,20 +223,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 user_id=target_user_id,
                 permissions=ChatPermissions(
-                    can_send_messages=True,
-                    can_send_media_messages=True,
-                    can_send_polls=True,
-                    can_send_other_messages=True,
-                    can_add_web_page_previews=True,
-                    can_change_info=True,
-                    can_invite_users=True,
-                    can_pin_messages=True
+                    can_send_messages=True, can_send_media_messages=True,
+                    can_send_polls=True, can_send_other_messages=True,
+                    can_add_web_page_previews=True, can_change_info=True,
+                    can_invite_users=True, can_pin_messages=True
                 )
             )
         except TelegramError:
             pass
         
-        # FIX: Get the target user's details
         target_user = await context.bot.get_chat_member(chat_id, target_user_id)
         if target_user.user.username:
             user_display = f"@{target_user.user.username}"
@@ -222,20 +270,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 user_id=target_user_id,
                 permissions=ChatPermissions(
-                    can_send_messages=True,
-                    can_send_media_messages=True,
-                    can_send_polls=True,
-                    can_send_other_messages=True,
-                    can_add_web_page_previews=True,
-                    can_change_info=True,
-                    can_invite_users=True,
-                    can_pin_messages=True
+                    can_send_messages=True, can_send_media_messages=True,
+                    can_send_polls=True, can_send_other_messages=True,
+                    can_add_web_page_previews=True, can_change_info=True,
+                    can_invite_users=True, can_pin_messages=True
                 )
             )
         except TelegramError:
             pass
 
-        # FIX: Get the target user's details
         target_user = await context.bot.get_chat_member(chat_id, target_user_id)
         if target_user.user.username:
             user_display = f"@{target_user.user.username}"
@@ -252,7 +295,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         )
 
-# ================= Start Func =================
 async def is_member_all(context, user_id: int) -> bool:
     for ch in CHANNELS:
         try:
@@ -267,7 +309,7 @@ async def is_member_all(context, user_id: int) -> bool:
 async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, query=False):
     keyboard = [
         [
-            InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
+            InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
             InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{CHANNELS[1].strip('@')}")
         ],
         [InlineKeyboardButton("✅ Done!!!", callback_data="done")]
@@ -280,7 +322,7 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     else:
         await update.message.reply_photo(photo=JOIN_IMAGE, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
-# ================= Message Handler =================
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_expired_warnings()
     if not update.message or not update.message.text:
@@ -296,33 +338,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id in admin_ids:
         return
 
-    # Check if the message is spam
-    is_url_spam = update.message.forward_from is not None
-    if not is_url_spam:
-        url_finder = re.compile(r"((?:https?://|www\.|t\.me/)\S+)", re.I)
-        found_urls = url_finder.findall(text)
-
-        for url in found_urls:
-            try:
-                parsed_url = urlparse(url)
-                domain = parsed_url.netloc.lower().replace("www.", "")
-                
-                if not domain and parsed_url.path:
-                    domain = parsed_url.path.strip('/').split('/')[0].lower()
-
-                if domain not in [d.lower() for d in ALLOWED_DOMAINS]:
-                    is_url_spam = True
-                    break
-            except Exception:
-                is_url_spam = True
-                break
-
-    if is_url_spam:
+    # Unified function to handle and respond to spam/promotion
+    async def handle_spam(reason_text: str):
         try:
             await update.message.delete()
         except Exception:
             pass
-
+        
         warn_count, expiry = add_warning(chat.id, user.id)
         expiry_str = datetime.fromisoformat(expiry).strftime("%d/%m/%Y %H:%M")
         
@@ -331,86 +353,65 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             clickable_name = f"<a href='tg://user?id={user.id}'>{html.escape(user.first_name)}</a>"
             user_display = clickable_name
-            
-        if warn_count == 1:
+
+        caption = ""
+        keyboard = None
+
+        if warn_count <= 2:
             caption = (
-                f"{user_display} [{user.id}] sent a spam message.\n"
-                f"Action: Warn (1/3) ❕ until {expiry_str}."
-            )
-            keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
-        elif warn_count == 2:
-            caption = (
-                f"{user_display} [{user.id}] sent a spam message.\n"
-                f"Action: Warn (2/3) ❗ until {expiry_str}."
+                f"{user_display} [{user.id}] {reason_text}.\n"
+                f"Action: Warn ({warn_count}/3) ❕ until {expiry_str}."
             )
             keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
         else:
             caption = (
-                f"{user_display} [{user.id}] sent a spam message.\n"
-                f"• Warns now: (3/3) ❕ until {expiry_str}.\n"
-                f"• Action: Muted 🔇"
+                f"{user_display} [{user.id}] has exceeded the warning limit.\n"
+                f"Action: Muted ({warn_count}/3) 🔇 until {expiry_str}."
             )
             keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{user.id}")]]
-
+            if chat.id == ALLOWED_GROUP_ID:
+                until_date = datetime.now() + timedelta(days=1)
+                await context.bot.restrict_chat_member(
+                    chat_id=chat.id,
+                    user_id=user.id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=until_date
+                )
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await bot.send_message(
+        await context.bot.send_message(
             chat_id=chat.id,
             text=caption,
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
-        if warn_count >= 3 and chat.id == ALLOWED_GROUP_ID:
-            until_date = datetime.now() + timedelta(days=1)
-            await context.bot.restrict_chat_member(
-                chat_id=chat.id,
-                user_id=user.id,
-                permissions=ChatPermissions(can_send_messages=False),
-                until_date=until_date
-            )
-    
-    elif USERNAME_REQUIRED and not user.username:
-        warn_count, expiry = add_warning(chat.id, user.id)
-        
-        clickable_name = f"<a href='tg://user?id={user.id}'>{html.escape(user.first_name)}</a>"
-        
-        if warn_count == 1:
-            caption = (
-                f"{clickable_name} [{user.id}] In order to be accepted in the group, "
-                f"please set up a username.\n"
-                f"Action: Warn (1/3) ❕"
-            )
-        elif warn_count == 2:
-            caption = (
-                f"{clickable_name} [{user.id}] In order to be accepted in the group, "
-                f"please set up a username.\n"
-                f"Action: Warn (2/3) ❗"
-            )
-        else:
-            caption = (
-                f"{clickable_name} [{user.id}] In order to be accepted in the group, "
-                f"please set up a username.\n"
-                f"• Warns now: (3/3) ❕\n"
-                f"• Action: Muted 🔇"
-            )
-        
-        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            caption,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.HTML
-        )
-        
-        if warn_count >= 3 and chat.id == ALLOWED_GROUP_ID:
-            until_date = datetime.now() + timedelta(days=1)
-            await context.bot.restrict_chat_member(
-                chat_id=chat.id,
-                user_id=user.id,
-                permissions=ChatPermissions(can_send_messages=False),
-                until_date=until_date
-            )
-            
+
+    # 1. Check for mentions of channels/groups/supergroups
+    if update.message.entities:
+        for entity in update.message.entities:
+            if entity.type == MessageEntity.MENTION:
+                mentioned_username = text[entity.offset:entity.offset + entity.length]
+                if mentioned_username:
+                    try:
+                        mentioned_chat = await context.bot.get_chat(mentioned_username)
+                        if mentioned_chat.type in [ChatType.CHANNEL, ChatType.GROUP, ChatType.SUPERGROUP]:
+                            await handle_spam("Promotion not allowed!")
+                            return
+                    except TelegramError:
+                        pass
+
+    # 2. Check for hybrid spam (rules + ML)
+    is_spam_message, reason = is_spam(text)
+    if is_spam_message:
+        await handle_spam(reason)
+        return
+
+    # 3. Check for users without a username (old rule)
+    if USERNAME_REQUIRED and not user.username:
+        await handle_spam("in order to be accepted in the group, please set up a username")
+        return
+
+
 # ================= Bot Status Updates Handler =================
 async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.new_chat_members:
@@ -436,6 +437,29 @@ async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ================= Run Bot =================
 async def run_bot():
+    global ML_MODEL, TFIDF_VECTORIZER
+    
+    # Load and train the ML model at startup
+    try:
+        df = pd.read_csv("https://raw.githubusercontent.com/hemanth-attr/mybot/refs/heads/main/data/sms.csv", encoding="latin-1")
+        df = df.drop(columns=['Unnamed: 2', 'Unnamed: 3', 'Unnamed: 4'], axis=1)
+        df.rename(columns={'v1': 'label', 'v2': 'text'}, inplace=True)
+        df['label'] = df['label'].map({'ham': 0, 'spam': 1})
+        
+        X_train, X_test, y_train, y_test = train_test_split(df['text'], df['label'], test_size=0.2, random_state=42)
+        
+        TFIDF_VECTORIZER = TfidfVectorizer(stop_words='english')
+        X_train_tfidf = TFIDF_VECTORIZER.fit_transform(X_train)
+        
+        ML_MODEL = MultinomialNB()
+        ML_MODEL.fit(X_train_tfidf, y_train)
+        logger.info("ML model loaded and trained successfully.")
+    except Exception as e:
+        logger.error(f"Failed to load or train ML model: {e}")
+        logger.warning("Bot will operate in rule-based mode only.")
+        ML_MODEL = None
+        TFIDF_VECTORIZER = None
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*)$"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
