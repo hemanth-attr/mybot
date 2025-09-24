@@ -123,7 +123,7 @@ def rule_check(message_text: str) -> (bool, str):
         return True, "sent suspicious keywords"
 
     # Rule 5: Unusually long messages
-   # if len(message_text) > 500:
+    #if len(message_text) > 500:
     #    return True, "sent an unusually long message"
     
     return False, None
