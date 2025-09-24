@@ -96,7 +96,7 @@ def rule_check(message_text: str) -> (bool, str):
 
     # Rule 1: Always block t.me links
     if "t.me/" in text_lower:
-        return True, "Promotion not allowed!"
+        return True, "Promotion is not allowed here!"
 
     # Rule 2: Block all other URLs if BLOCK_ALL_URLS is enabled
     if BLOCK_ALL_URLS:
