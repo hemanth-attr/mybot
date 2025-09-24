@@ -33,6 +33,9 @@ PORT = int(os.environ.get("PORT", 10000))
 ALLOWED_GROUP_ID = -1002810504524
 WARNINGS_FILE = "warnings.json"
 
+# List of Telegram's internal bot IDs to ignore
+SYSTEM_BOT_IDS = [136817688, 1087968824]
+
 # Toggle the username requirement feature
 USERNAME_REQUIRED = False
 
@@ -332,6 +335,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     text = update.message.text or ""
 
+    # Skip System bots
+    if user.id in SYSTEM_BOT_IDS:
+        return
+        
     # Skip admins
     chat_admins = await chat.get_administrators()
     admin_ids = [admin.user.id for admin in chat_admins]
