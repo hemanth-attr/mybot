@@ -46,7 +46,7 @@ ALLOWED_DOMAINS = ["plus-ui.blogspot.com", "plus-ul.blogspot.com", "fineshopdesi
 # ================= Global Variables for ML Model =================
 ML_MODEL = None
 TFIDF_VECTORIZER = None
-SPAM_KEYWORDS = {"free", "lottery", "click here", "subscribe", "win", "claim", "money", "deal"}
+SPAM_KEYWORDS = {"lottery", "deal"}
 SPAM_EMOJIS = {"😀", "😂", "🔥", "💯", "😍", "❤️", "🥳", "🎉", "💰", "💵", "🤑"}
 
 # ================= Logging =================
