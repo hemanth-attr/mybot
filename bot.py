@@ -21,7 +21,7 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 from urllib.parse import urlparse
-from typing import cast, Any, tuple
+from typing import cast, Any
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
 
