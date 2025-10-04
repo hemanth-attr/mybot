@@ -7,7 +7,6 @@ import html
 import joblib
 import time
 from datetime import datetime, timedelta
-# Import Hypercorn components for asynchronous server serving
 from flask import Flask, request
 from unidecode import unidecode
 from telegram import (
@@ -418,7 +417,7 @@ def ping():
     return "OK"
 
 @app.route(WEBHOOK_PATH, methods=["POST"])
-async def telegram_webhook():
+def telegram_webhook(): # CHANGED: This is now a synchronous function
     """Route to receive updates from Telegram."""
     if request.json:
         # We must ensure the app is running before processing an update
@@ -426,17 +425,21 @@ async def telegram_webhook():
              logger.warning("Application not running, skipping update.")
              return "Application not running", 503
              
-        # --- CRUCIAL: Added robust error handling ---
+        # --- CRUCIAL FIX: Using update_queue.put_nowait for synchronous handing of the update payload ---
         try:
+            # Create the Update object from the incoming JSON
             update = Update.de_json(cast(dict, request.json), application.bot)
-            await application.process_update(update)
+            
+            # Put the update into the application's queue to be processed asynchronously by the bot's loop
+            application.update_queue.put_nowait(update)
+            
         except Exception as e:
             # Log error with full traceback for diagnostics, but return OK to Telegram.
-            logger.error(f"Error processing update: {e}", exc_info=True)
-            # CONTINUE to return "OK" to Telegram to prevent webhook from being disabled
+            # This ensures Telegram's webhook system doesn't get disabled.
+            logger.error(f"Error handling incoming update payload: {e}", exc_info=True)
         # ---------------------------------------------
             
-    return "OK"
+    return "OK" # Always return 200 OK to Telegram instantly
 
 # ================= Run Bot Server (Final Webhook Logic) =================
 
@@ -494,9 +497,12 @@ async def serve_app():
 async def run_bot_server():
     """The main entry point for the bot in Webhook mode."""
     await setup_bot_application()
+    
+    # We set the webhook AFTER the application is started
     await setup_webhook()
 
     try:
+        # This will block and run the web server
         await serve_app()
     finally:
         await application.stop()
