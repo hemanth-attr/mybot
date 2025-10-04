@@ -27,7 +27,6 @@ from hypercorn.config import Config
 # ================= Configuration =================
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
-    # CRITICAL IMPROVEMENT: Use logger instead of print for service errors
     logging.critical("FATAL: TOKEN environment variable not set. Please set it to your bot token.")
 
 CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
@@ -39,13 +38,13 @@ PORT = int(os.environ.get("PORT", 10000))
 # IMPORTANT: Replace this with your actual group ID
 ALLOWED_GROUP_ID = -1002810504524
 WARNINGS_FILE = "warnings.json"
-BEHAVIOR_FILE = "user_behavior.json"
+BEHAVIOR_FILE = "user_behavior.json" # Used for flood/initial message tracking
 
 SYSTEM_BOT_IDS = [136817688, 1087968824]
 USERNAME_REQUIRED = False
 
 # === WEBHOOK CONFIGURATION (CRUCIAL FOR DEPLOYMENT) ===
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 WEBHOOK_PATH = "/botupdates"
 # =============================
 
@@ -75,17 +74,15 @@ ML_MODEL = None
 TFIDF_VECTORIZER = None
 warnings = {}
 user_behavior = {}
-# DATA SAFETY IMPROVEMENT: Add a lock for file I/O in an async environment
-data_lock = asyncio.Lock()
 
 # ================= Logging =================
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - %(message)s",
+    format="%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - %(message)s", 
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ================= Data Management =================
+# ================= Data Management (Synchronous for simplified files) =================
 def load_data(file_path):
     if os.path.exists(file_path):
         try:
@@ -97,18 +94,14 @@ def load_data(file_path):
     return {}
 
 def save_data(data, file_path):
-    # NOTE: This function is still called synchronously. For true safety in an
-    # async environment, this should be wrapped in `await data_lock.acquire()`
-    # but for simple file writing on platforms like Heroku/Render, we focus
-    # on correct calling logic.
     with open(file_path, "w") as f:
         json.dump(data, f, default=str, indent=4)
 
 def load_all_data():
     """Centralized synchronous data load."""
     global warnings, user_behavior
-    warnings = load_data(WARNINGS_FILE)
-    user_behavior = load_data(BEHAVIOR_FILE)
+    warnings.update(load_data(WARNINGS_FILE))
+    user_behavior.update(load_data(BEHAVIOR_FILE))
 
 def save_all_data():
     """Centralized synchronous data save."""
@@ -124,7 +117,6 @@ def add_warning(chat_id: int, user_id: int):
     user_warn["expiry"] = str(datetime.now() + timedelta(days=1))
     chat_warns[str(user_id)] = user_warn
     
-    # We save here because warnings are critical state
     save_all_data() 
     return user_warn["count"], user_warn["expiry"]
 
@@ -141,7 +133,7 @@ def clean_expired_warnings():
                     cleaned = True
             except Exception:
                 # Handle cases with malformed expiry data by deleting the entry
-                del warnings[chat_id][user_id]
+                warnings[chat_id].pop(user_id, None)
                 cleaned = True
         if not warnings.get(chat_id):
             warnings.pop(chat_id, None)
@@ -153,11 +145,10 @@ def clean_expired_warnings():
 # ================= Advanced Behavioral Analysis (FIXED DATA ACCESS) =================
 
 def update_user_activity(user_id: int):
-    """Updates user activity in the global user_behavior dict (no I/O here)."""
+    """Updates user activity in the global user_behavior dict."""
     user_id_str = str(user_id)
     now = time.time()
     
-    # We rely on load_all_data() at the start of message_handler()
     activity = user_behavior.setdefault(user_id_str, {"messages": [], "initial_count": 0})
     
     # Filter out old messages
@@ -166,29 +157,23 @@ def update_user_activity(user_id: int):
     
     if activity["initial_count"] < MAX_INITIAL_MESSAGES:
         activity["initial_count"] += 1
-        
-    # IMPORTANT: We no longer save data here on every message.
-    # Saving is now done once at the end of message_handler's successful path.
 
-    return activity
+    # NOTE: Behavior saving is deferred to the end of message_handler for efficiency
 
 def is_flood_spam(user_id: int) -> bool:
     """Checks flood status based on current global data."""
     user_id_str = str(user_id)
-    # Rely on global state, not local file load
     activity = user_behavior.get(user_id_str, {"messages": []})
     return len(activity["messages"]) >= FLOOD_MESSAGE_COUNT
 
 def is_first_message_critical(user_id: int) -> bool:
     """Checks first message status based on current global data."""
     user_id_str = str(user_id)
-    # Rely on global state, not local file load
     activity = user_behavior.get(user_id_str, {"initial_count": 0})
     return activity["initial_count"] < MAX_INITIAL_MESSAGES
 
 
 # ================= Spam Detection Functions =================
-# Simplified spam detection rules for brevity (using rules from your code)
 def rule_check(message_text: str, message_entities: list[MessageEntity] | None, user_id: int) -> (bool, str):
     
     is_critical_message = is_first_message_critical(user_id)
@@ -206,7 +191,6 @@ def rule_check(message_text: str, message_entities: list[MessageEntity] | None, 
         allowed_domains_lower = [d.lower() for d in ALLOWED_DOMAINS]
 
         for url in found_urls:
-            # Skip Telegram links since they are already caught by Rule 1
             if "t.me/" in url.lower() or "telegram.me/" in url.lower():
                 continue
 
@@ -250,7 +234,7 @@ def rule_check(message_text: str, message_entities: list[MessageEntity] | None, 
 def ml_check(message_text: str) -> bool:
     """Uses a trained ML model to detect tricky spam. Relies on global data."""
     if ML_MODEL and TFIDF_VECTORIZER:
-        # Load data locally before using ML - REMOVED: Rely on load_all_data() at start
+        # Note: We rely on load_all_data() at the start of message_handler
         processed_text = TFIDF_VECTORIZER.transform([unidecode(message_text)])
         prediction = ML_MODEL.predict(processed_text)[0]
         return prediction == 1
@@ -280,7 +264,7 @@ bot = Bot(TOKEN)
 application = ApplicationBuilder().bot(bot).build()
 
 
-# ================= File Download/Join Check Logic (RESTORED) =================
+# ================= File Download/Join Check Logic =================
 
 async def is_member_all(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     """Checks if a user is a member of all required channels."""
@@ -289,14 +273,13 @@ async def is_member_all(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> boo
             member = await context.bot.get_chat_member(ch, user_id)
             if member.status not in ["member", "administrator", "creator"]:
                 return False
-        except TelegramError as e: # Better error handling
+        except TelegramError as e: 
             logger.error(f"Error checking {ch} for user {user_id}: {e}")
-            # If the channel check fails due to, e.g., bot not being an admin/member,
-            # we should treat it as a failure to be safe.
             return False
     return True
 
-async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, query=False):
+async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
+    """Sends the message prompting the user to join channels and download the file."""
     keyboard = [
         [
             InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
@@ -307,10 +290,21 @@ async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     reply_markup = InlineKeyboardMarkup(keyboard)
     caption = "💡 Join All Channels & Groups To Download the Latest Plus UI Blogger Template !!!\nAfter joining, press ✅ Done!!!"
 
-    if query and update.callback_query and update.callback_query.message:
-        await update.callback_query.message.reply_photo(photo=JOIN_IMAGE, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    if is_callback and update.callback_query and update.callback_query.message:
+        # Use reply_photo to send a NEW message in response to the callback
+        await update.callback_query.message.reply_photo(
+            photo=JOIN_IMAGE, 
+            caption=caption, 
+            reply_markup=reply_markup, 
+            parse_mode=ParseMode.HTML
+        )
     elif update.message:
-        await update.message.reply_photo(photo=JOIN_IMAGE, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        await update.message.reply_photo(
+            photo=JOIN_IMAGE, 
+            caption=caption, 
+            reply_markup=reply_markup, 
+            parse_mode=ParseMode.HTML
+        )
 
 
 # ================= Handlers =================
@@ -323,7 +317,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == ChatType.PRIVATE:
         await send_join_message(update, context)
     else:
-        # Simple welcome for group chat /start
         await update.message.reply_text("Welcome! I am an anti-spam bot. Use /help to see my commands.")
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -331,176 +324,124 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         return
         
-    await query.answer()
-
-    # ================= Done / Verified =================
-    if query.data == "done":
+    data = query.data
+    
+    # ================= 1. Done / Verified (File Gating) =================
+    if data == "done":
         user_id = query.from_user.id
         if await is_member_all(context, user_id):
-            await query.answer("Download initiated!", show_alert=False)
+            
+            # SUCCESS PATH: Answer the query without an alert
+            await query.answer("Download initiated!", show_alert=False) 
+            
+            # Edit the button message to acknowledge success
             if query.message:
-                 await query.delete_message()
-            await context.bot.send_sticker(chat_id=user_id, sticker=STICKER_ID)
+                await query.message.edit_caption(caption="✅ Verification successful! Initiating download...")
+            
+            # Send file document in private chat
+            chat_id = user_id 
+            await context.bot.send_sticker(chat_id=chat_id, sticker=STICKER_ID)
             await context.bot.send_message(
-                chat_id=user_id,
+                chat_id=chat_id,
                 text=f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is now ready..."
             )
-            await context.bot.send_document(chat_id=user_id, document=FILE_PATH)
+            await context.bot.send_document(chat_id=chat_id, document=FILE_PATH)
+            
         else:
-            await query.answer(
+            # FAILURE PATH: Answer the query with the alert (This fixes the reported issue)
+            await query.answer( 
                 "⚠️ You must join all channels and groups to download the file.",
                 show_alert=True
             )
+            # Re-send the join message (after deleting the old one for cleanup)
             if query.message:
-                # Use edit_message_caption to update the existing message if possible
-                try:
-                    await query.message.edit_caption(
-                         caption="⚠️ **You must join all channels and groups to download the file.**\n\n"
-                                 "💡 Join All Channels & Groups To Download the Latest Plus UI Blogger Template !!!\nAfter joining, press ✅ Done!!!",
-                         reply_markup=query.message.reply_markup,
-                         parse_mode=ParseMode.MARKDOWN
-                    )
-                except TelegramError:
-                    # If editing fails (e.g., too old), send a new one
-                    await send_join_message(update, context, query=True)
+                 await query.message.delete()
+            await send_join_message(update, context, is_callback=True)
+            return
             
-    # ================= Cancel Warn =================
-    elif query.data.startswith("cancel_warn"):
-        _, chat_id, target_user_id = query.data.split(":")
-        chat_id = int(chat_id)
-        target_user_id = int(target_user_id)
+    # ================= 2. Cancel Warn / Unmute (Admin Actions) =================
+    elif data.startswith("cancel_warn:") or data.startswith("unmute:"):
+        action, chat_id_str, user_id_str = data.split(":")
+        chat_id = int(chat_id_str)
+        user_id = int(user_id_str)
 
-        chat_admins = await bot.get_chat_administrators(chat_id)
-        admin_ids = [admin.user.id for admin in chat_admins]
-        if query.from_user.id not in admin_ids:
-            await query.answer(
-                "⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
-                show_alert=True
-            )
-            return
-
-        # Load data just before modification to ensure it's fresh
-        load_all_data() 
-        
-        await query.answer("Warnings reset successfully.")
-
-        chat_id_str = str(chat_id)
-        target_user_id_str = str(target_user_id)
-        if chat_id_str in warnings and target_user_id_str in warnings[chat_id_str]:
-            del warnings[chat_id_str][target_user_id_str]
-            # CRITICAL FIX: Changed save_warnings() to save_all_data()
-            save_all_data() 
-
+        # --- Check Admin Permissions ---
         try:
-            await bot.restrict_chat_member(
+            chat_admins = await context.bot.get_chat_administrators(chat_id)
+            admin_ids = [admin.user.id for admin in chat_admins]
+        except TelegramError:
+            admin_ids = []
+
+        if query.from_user.id not in admin_ids:
+            await query.answer("You are not authorized to perform this action.", show_alert=True)
+            return
+        
+        # --- Acknowledge and proceed ---
+        await query.answer("Processing action...", show_alert=False)
+            
+        # --- Reset Warnings (applies to both cancel_warn and unmute) ---
+        user_id_str = str(user_id)
+        if chat_id_str in warnings and user_id_str in warnings[chat_id_str]:
+             del warnings[chat_id_str][user_id_str]
+             save_all_data()
+             
+        # --- Unmute User ---
+        try:
+            await context.bot.restrict_chat_member(
                 chat_id=chat_id,
-                user_id=target_user_id,
+                user_id=user_id,
                 permissions=ChatPermissions(
                     can_send_messages=True, can_send_media_messages=True,
                     can_send_polls=True, can_send_other_messages=True,
-                    can_add_web_page_previews=True, can_change_info=True,
-                    can_invite_users=True, can_pin_messages=True
+                    can_add_web_page_previews=True, can_change_info=False,
+                    can_invite_users=True, can_pin_messages=False 
                 )
             )
-        except TelegramError:
+        except TelegramError as e:
+            logger.error(f"Failed to unrestrict chat member {user_id}: {e}")
             pass
-        
-        target_user = await context.bot.get_chat_member(chat_id, target_user_id)
-        if target_user.user.username:
-            user_display = f"@{target_user.user.username}"
-        else:
-            user_display = f"{target_user.user.first_name}"
-
+            
+        user_to_act = await context.bot.get_chat_member(chat_id, user_id)
+        user_display = f"<a href='tg://user?id={user_id}'>{html.escape(user_to_act.user.first_name)}</a>"
         current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
-        
+
+        # --- Edit Message ---
         if query.message:
-            await query.message.edit_text(
-                f"✅ {user_display}'s warnings have been reset!\n"
-                f"• Action: Warns (0/3)\n"
-                f"• Reset on: {current_time}",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{target_user_id}")]]
+            if action == "unmute":
+                await query.message.edit_text(
+                    f"🔊 {user_display} has been unmuted and warnings cleared!\n"
+                    f"• Action: Unmuted and Warns Reset (0/3)\n• Time: <code>{current_time}</code>",
+                    parse_mode=ParseMode.HTML
                 )
-            )
-
-    # ================= Unmute =================
-    elif query.data.startswith("unmute"):
-        _, chat_id, target_user_id = query.data.split(":")
-        chat_id = int(chat_id)
-        target_user_id = int(target_user_id)
-
-        chat_admins = await bot.get_chat_administrators(chat_id)
-        admin_ids = [admin.user.id for admin in chat_admins]
-        if query.from_user.id not in admin_ids:
-            await query.answer(
-                "⚠️ You don't have permission to do this operation\n💡 You Need to Be admin To do This operation",
-                show_alert=True
-            )
-            return
-
-        await query.answer("User unmuted successfully.")
-
-        try:
-            await bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=target_user_id,
-                permissions=ChatPermissions(
-                    can_send_messages=True, can_send_media_messages=True,
-                    can_send_polls=True, can_send_other_messages=True,
-                    can_add_web_page_previews=True, can_change_info=True,
-                    can_invite_users=True, can_pin_messages=True
+            elif action == "cancel_warn":
+                 await query.message.edit_text(
+                    f"❌ {user_display}'s warnings have been reset!\n"
+                    f"• Action: Warns Reset (0/3)\n• Reset on: <code>{current_time}</code>",
+                    parse_mode=ParseMode.HTML
                 )
-            )
-        except TelegramError:
-            pass
 
-        target_user = await context.bot.get_chat_member(chat_id, target_user_id)
-        if target_user.user.username:
-            user_display = f"@{target_user.user.username}"
-        else:
-            user_display = f"{target_user.user.first_name}"
-        
-        current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
-        
-        if query.message:
-            await query.message.edit_text(
-                f"🔊 {user_display} has been unmuted!\n"
-                f"• Action: Unmuted\n"
-                f"• Time: {current_time}",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat_id}:{target_user_id}")]]
-                )
-            )
 
 async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
         
-    # This logic handles new and left members, including bot kicking
     if update.message.new_chat_members:
         for member in update.message.new_chat_members:
-            if member.is_bot:
+            if member.is_bot and member.id != context.bot.id: # Don't kick self
                 try:
-                    # Check if the bot being kicked is the current bot (self)
-                    if member.id == context.bot.id:
-                        continue # Don't kick self if added
-                        
                     await context.bot.kick_chat_member(update.message.chat_id, member.id)
-                    logger.info(f"Kicked bot {member.id} upon join.")
                 except TelegramError as e:
                     logger.warning(f"Could not kick bot {member.id}: {e}")
             
-    elif update.message.left_chat_member:
+    if update.message.left_chat_member or update.message.new_chat_members:
         try:
-            # Delete "user left" message
+            # Delete join/leave messages
             await update.message.delete()
         except TelegramError:
             pass
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # CENTRALIZED DATA MANAGEMENT FOR THIS UPDATE
-    # This assumes the file I/O is fast enough for a single update process.
-    # For high concurrency, locks (like data_lock) and a true DB are needed.
+    # CRITICAL: Load data once at the start
     load_all_data() 
     clean_expired_warnings()
     
@@ -521,7 +462,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError:
         admin_ids = []
 
-    # Admins are exempt from spam checks
     if user.id in admin_ids:
         return
         
@@ -532,7 +472,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.delete()
         except TelegramError as e:
-            logger.error(f"Failed to delete message from {user.id}: {e}")
+            logger.error(f"Failed to delete message: {e}")
         
         # add_warning handles saving the warnings file
         warn_count, expiry = add_warning(chat.id, user.id)
@@ -541,7 +481,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_mention = f"<a href='tg://user?id={user.id}'>{html.escape(user.first_name)}</a>"
         user_display = f"{user_mention} [<code>{user.id}</code>]"
 
-        caption = ""
         keyboard = None
 
         if warn_count <= 2:
@@ -557,7 +496,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{user.id}")]]
             
-            # Muting is only enforced in the single allowed group
+            # Enforce Mute
             if chat.id == ALLOWED_GROUP_ID:
                 until_date = datetime.now() + timedelta(days=1)
                 try:
@@ -580,29 +519,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except TelegramError as e:
             logger.error(f"Failed to send warning message: {e}")
-
-
-    # Check for mentions and links within entities (Telegram/Channel Promotion)
+            
+    # Check for entity-based spam (mentions/links)
     if entities:
         for entity in entities:
-            # Check for Channel/Group Mentions
             if entity.type == MessageEntityType.MENTION:
                 mentioned_username = text[entity.offset:entity.offset + entity.length]
                 if mentioned_username:
                     try:
-                        # Attempt to resolve the mention to a chat object
                         mentioned_chat = await context.bot.get_chat(mentioned_username)
                         if mentioned_chat.type in [ChatType.CHANNEL, ChatType.GROUP, ChatType.SUPERGROUP]:
                             await handle_spam("Promotion not allowed (Channel/Group Mention)!")
-                            # Save behavior on exit (spam detected)
-                            save_data(user_behavior, BEHAVIOR_FILE) 
+                            save_all_data() # Save behavior state on exit
                             return
                     except TelegramError:
-                        pass # Ignore if it's a private user mention or lookup fails
+                        pass
             
-            # Check for Telegram Links in URL/Text_Link Entities
             is_link_entity = entity.type in [MessageEntityType.URL, MessageEntityType.TEXT_LINK]
-
             if is_link_entity:
                 link_url = ""
                 if entity.type == MessageEntityType.URL:
@@ -612,27 +545,25 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 if "t.me/" in link_url or "telegram.me/" in link_url:
                     await handle_spam("Promotion not allowed (Telegram Link Entity)!")
-                    # Save behavior on exit (spam detected)
-                    save_data(user_behavior, BEHAVIOR_FILE) 
+                    save_all_data() # Save behavior state on exit
                     return
 
     # Check for rule-based or ML spam
     is_spam_message, reason = is_spam(text, entities, user.id)
     if is_spam_message:
         await handle_spam(reason)
-        # Save behavior on exit (spam detected)
-        save_data(user_behavior, BEHAVIOR_FILE) 
+        save_all_data() # Save behavior state on exit
         return
 
     # Check for username requirement
     if USERNAME_REQUIRED and not user.username:
         await handle_spam("in order to be accepted in the group, please set up a username")
-        # Save behavior on exit (spam detected)
-        save_data(user_behavior, BEHAVIOR_FILE) 
+        save_all_data() # Save behavior state on exit
         return
         
     # Successful Path: Save updated user behavior before exiting
-    save_data(user_behavior, BEHAVIOR_FILE) 
+    save_all_data()
+
 
 # ================= Flask Routes for Webhooks and Health Checks =================
 
@@ -648,12 +579,12 @@ def ping():
 def telegram_webhook(): 
     if request.json:
         if not application.running:
-              logger.warning("Application not running, skipping update.")
-              return "Application not running", 503
-              
+             logger.warning("Application not running, skipping update.")
+             return "Application not running", 503
+             
         try:
             update = Update.de_json(cast(dict, request.json), application.bot)
-            # Use `put_nowait` for speed, assuming the application handles the load
+            # Use `put_nowait` for speed in the webhook listener
             application.update_queue.put_nowait(update) 
             
         except Exception as e:
@@ -666,12 +597,13 @@ def telegram_webhook():
 async def setup_bot_application():
     global ML_MODEL, TFIDF_VECTORIZER
     
-    load_all_data() # Initial load of all data
+    # Initial load of all data
+    load_all_data() 
 
     try:
-        # NOTE: Make sure these files exist in your deployment environment
+        # Load ML model files from disk (ensure these paths exist in deployment)
         TFIDF_VECTORIZER = joblib.load('models/vectorizer.joblib') 
-        ML_MODEL = joblib.load('models/model.joblib')          
+        ML_MODEL = joblib.load('models/model.joblib')             
         logger.info("ML model loaded successfully from disk.")
     except Exception as e:
         logger.warning(f"Failed to load ML model files: {e}")
@@ -680,7 +612,6 @@ async def setup_bot_application():
         TFIDF_VECTORIZER = None
         
     application.add_handler(CommandHandler("start", start))
-    # NOTE: The pattern is correct for all callbacks
     application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*)$"))
     application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, message_handler))
     application.add_handler(MessageHandler(
@@ -694,7 +625,8 @@ async def setup_bot_application():
 async def setup_webhook():
     if not WEBHOOK_URL:
         logger.error("FATAL: WEBHOOK_URL environment variable is not set. Cannot run in Webhook mode.")
-        return False
+        # If no webhook URL is set, the bot must be run in polling mode (not supported by this code's main function)
+        return False 
         
     full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
     
@@ -711,25 +643,33 @@ async def serve_app():
     config = Config()
     config.bind = [f"0.0.0.0:{PORT}"]
     
+    # Hypercorn serves the Flask app asynchronously
     await serve(app, config)
     
 async def run_bot_server():
+    """Main function to setup bot and start the web server."""
     await setup_bot_application()
     
-    # We must ensure the webhook setup happens AFTER the application starts initializing
+    # Must run the setup webhook logic AFTER the application starts initializing
     if WEBHOOK_URL: 
         await setup_webhook()
 
     try:
         await serve_app()
     finally:
+        # This runs when the web server is gracefully shut down
         await application.stop()
         save_all_data() # Final save on shutdown
         logger.info("Bot server shut down gracefully.")
 
 
 def main():
+    if not WEBHOOK_URL:
+        logger.critical("Bot is configured for webhooks but WEBHOOK_URL is missing. It will not receive updates.")
+        # Add guidance for running in polling mode if desired, or exit.
+
     try:
+        # Required for Windows if running locally
         if os.name == 'nt':
              asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
              
