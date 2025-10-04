@@ -341,7 +341,7 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
         # Check if the user is an admin
         sender_member: ChatMember = await update.effective_chat.get_member(update.effective_user.id)
-        if sender_member.status in (ChatMember.ADMINISTRATOR, ChatMember.CREATOR):
+        if sender_member.status in (ChatMember.ADMINISTRATOR, ChatMember.OWNER):
             return True
     except TelegramError as e:
         logger.error(f"Error checking admin status: {e}")
