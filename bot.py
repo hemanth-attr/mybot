@@ -25,11 +25,11 @@ from urllib.parse import urlparse
 
 # ================= Configuration =================
 # Set your token here if you don't use environment variables, but ENV is recommended
-TOKEN = os.getenv("TOKEN") 
+TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     print("FATAL: TOKEN environment variable not set. Please set it to your bot token.")
     # Exiting here is safer than running with no token, for a real bot.
-    # raise ValueError("TOKEN environment variable is missing.") 
+    # raise ValueError("TOKEN environment variable is missing.")
 
 CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
@@ -37,7 +37,7 @@ FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
 # IMPORTANT: Replace this with your actual group ID (e.g., -1001234567890)
-ALLOWED_GROUP_ID = -1002810504524 
+ALLOWED_GROUP_ID = -1002810504524
 WARNINGS_FILE = "warnings.json"
 BEHAVIOR_FILE = "user_behavior.json"
 
@@ -50,20 +50,20 @@ ALLOWED_DOMAINS = ["plus-ui.blogspot.com", "plus-ul.blogspot.com", "fineshopdesi
 
 # === ENHANCED SPAM DETECTION CONFIG ===
 SPAM_KEYWORDS = {
-    "lottery", "deal", "coupon", "promo", "discount", "referral", "link in bio", 
-    "join now", "limited time", "don't miss", "hurry", "crypto", 
+    "lottery", "deal", "coupon", "promo", "discount", "referral", "link in bio",
+    "join now", "limited time", "don't miss", "hurry", "crypto",
     "investment", "paid group", "buy now"
 }
 SPAM_EMOJIS = {"😀", "😂", "🔥", "💯", "😍", "❤️", "🥳", "🎉", "💰", "💵", "🤑", "🤩"}
 FORMATTING_ENTITY_TYPES = {
-    MessageEntityType.BOLD, MessageEntityType.ITALIC, MessageEntityType.CODE, 
-    MessageEntityType.UNDERLINE, MessageEntityType.STRIKETHROUGH, MessageEntityType.SPOILER, 
+    MessageEntityType.BOLD, MessageEntityType.ITALIC, MessageEntityType.CODE,
+    MessageEntityType.UNDERLINE, MessageEntityType.STRIKETHROUGH, MessageEntityType.SPOILER,
     MessageEntityType.PRE, MessageEntityType.BLOCKQUOTE # Added Blockquote
 }
-MAX_FORMATTING_ENTITIES = 5     # Max allowed formatting entities
-MAX_INITIAL_MESSAGES = 3        # Stricter checks for first X messages
-FLOOD_INTERVAL = 5              # Seconds
-FLOOD_MESSAGE_COUNT = 3         # Max messages in FLOOD_INTERVAL seconds
+MAX_FORMATTING_ENTITIES = 5      # Max allowed formatting entities
+MAX_INITIAL_MESSAGES = 3         # Stricter checks for first X messages
+FLOOD_INTERVAL = 5               # Seconds
+FLOOD_MESSAGE_COUNT = 3          # Max messages in FLOOD_INTERVAL seconds
 
 # ================= Global Variables for ML Model/User Data =================
 ML_MODEL = None
@@ -122,7 +122,7 @@ def clean_expired_warnings():
                     del warnings[chat_id][user_id]
             except Exception:
                 # Handle corrupted data gracefully
-                del warnings[chat_id][user_id] 
+                del warnings[chat_id][user_id]
         if not warnings[chat_id]:
             del warnings[chat_id]
     save_all_data()
@@ -222,7 +222,7 @@ def rule_check(message_text: str, message_entities: list[MessageEntity] | None, 
     if message_entities:
         formatting_count = sum(1 for entity in message_entities if entity.type in FORMATTING_ENTITY_TYPES)
         # Apply stricter check for shorter/critical messages
-        text_length_limit = 200 if not is_critical_message else 100 
+        text_length_limit = 200 if not is_critical_message else 100
         
         if formatting_count >= MAX_FORMATTING_ENTITIES and len(message_text) < text_length_limit:
             return True, "used excessive formatting/bolding (a common spam tactic)"
@@ -241,7 +241,7 @@ def ml_check(message_text: str) -> bool:
     """Uses a trained ML model to detect tricky spam."""
     if ML_MODEL and TFIDF_VECTORIZER:
         # Process text using the same normalization as the rules
-        processed_text = TFIDF_VECTORIZER.transform([unidecode(message_text)]) 
+        processed_text = TFIDF_VECTORIZER.transform([unidecode(message_text)])
         prediction = ML_MODEL.predict(processed_text)[0]
         # Assuming 1 means spam
         return prediction == 1
@@ -299,7 +299,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "cancel_warn" or action == "unmute":
         # Simplified: For production, you'd check admin permissions here.
-        if query.from_user.id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
+        try:
+            admin_ids = [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]
+        except TelegramError:
+            admin_ids = []
+
+        if query.from_user.id not in admin_ids:
             await query.edit_message_text("You are not authorized to perform this action.")
             return
 
@@ -464,18 +469,19 @@ async def run_bot():
 
     # Load the pre-trained ML model and vectorizer from disk
     try:
-        TFIDF_VECTORIZER = joblib.load('vectorizer.joblib')
-        ML_MODEL = joblib.load('model.joblib')
+        # ** THIS IS THE CRITICAL FIX: CHANGING PATH TO INCLUDE 'models/' **
+        TFIDF_VECTORIZER = joblib.load('models/vectorizer.joblib') 
+        ML_MODEL = joblib.load('models/model.joblib')             
         logger.info("ML model loaded successfully from disk.")
     except Exception as e:
-        logger.warning(f"Failed to load ML model files (model.joblib or vectorizer.joblib): {e}")
+        logger.warning(f"Failed to load ML model files (models/model.joblib or models/vectorizer.joblib): {e}")
         logger.warning("Bot will operate in rule-based mode only (still highly effective).")
         ML_MODEL = None
         TFIDF_VECTORIZER = None
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*)$"))
-    application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, message_handler)) 
+    application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, message_handler))
     application.add_handler(MessageHandler(
         filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
         handle_status_updates
