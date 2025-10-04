@@ -1,7 +1,6 @@
-python-telegram-bot
-flask
+Flask
 hypercorn
-scikit-learn
-joblib
-pandas
+python-telegram-bot[job-queue] # Critical fix for the 'run_repeating' error
 unidecode
+joblib
+scikit-learn # Used for ML_MODEL and TFIDF_VECTORIZER
