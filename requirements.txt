@@ -4,3 +4,4 @@ hypercorn
 scikit-learn
 joblib
 pandas
+unidecode
