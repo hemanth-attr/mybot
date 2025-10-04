@@ -7,9 +7,8 @@ import html
 import joblib
 import time
 from datetime import datetime, timedelta
-# --- New Import ---
+# Import Hypercorn components for asynchronous server serving
 from flask import Flask, request
-# ------------------
 from unidecode import unidecode
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -22,7 +21,9 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 from urllib.parse import urlparse
-from typing import cast # For type hinting the request body
+from typing import cast
+from hypercorn.asyncio import serve
+from hypercorn.config import Config
 
 # ================= Configuration =================
 # Set your token here if you don't use environment variables, but ENV is recommended
@@ -43,11 +44,10 @@ BEHAVIOR_FILE = "user_behavior.json"
 SYSTEM_BOT_IDS = [136817688, 1087968824]
 USERNAME_REQUIRED = False
 
-# === WEBHOOK CONFIGURATION (New) ===
-# RENDER_EXTERNAL_URL (or similar) must be set to this in your environment
+# === WEBHOOK CONFIGURATION ===
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
-WEBHOOK_PATH = "/botupdates" # The endpoint for Telegram to send updates to
-# ===================================
+WEBHOOK_PATH = "/botupdates"
+# =============================
 
 # === URL Blocking Control ===
 BLOCK_ALL_URLS = False
@@ -76,9 +76,10 @@ TFIDF_VECTORIZER = None
 warnings = {}
 user_behavior = {}
 
-# ================= Logging =================
+# ================= Logging (Improved Format) =================
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    # Added funcName for better log troubleshooting
+    format="%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - %(message)s", 
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -126,7 +127,6 @@ def clean_expired_warnings():
                 if expiry < now:
                     del warnings[chat_id][user_id]
             except Exception:
-                # Handle corrupted data gracefully
                 del warnings[chat_id][user_id]
         if not warnings[chat_id]:
             del warnings[chat_id]
@@ -135,18 +135,14 @@ def clean_expired_warnings():
 # ================= Advanced Behavioral Analysis =================
 
 def update_user_activity(user_id: int):
-    """Tracks message count and time for flood detection, and initial message count."""
     user_id_str = str(user_id)
     now = time.time()
     
-    # Initialize or update user's flood history
     activity = user_behavior.setdefault(user_id_str, {"messages": [], "initial_count": 0})
     
-    # Update flood messages (remove old ones)
     activity["messages"] = [t for t in activity["messages"] if now - t < FLOOD_INTERVAL]
     activity["messages"].append(now)
     
-    # Increment initial message count (up to a max)
     if activity["initial_count"] < MAX_INITIAL_MESSAGES:
         activity["initial_count"] += 1
 
@@ -154,15 +150,12 @@ def update_user_activity(user_id: int):
     return activity
 
 def is_flood_spam(user_id: int) -> bool:
-    """Checks for rapid message flooding."""
     user_id_str = str(user_id)
     activity = user_behavior.get(user_id_str, {"messages": []})
     
-    # Check if user sent FLOOD_MESSAGE_COUNT or more messages in FLOOD_INTERVAL seconds
     return len(activity["messages"]) >= FLOOD_MESSAGE_COUNT
 
 def is_first_message_critical(user_id: int) -> bool:
-    """Returns True if the user is within their first MAX_INITIAL_MESSAGES."""
     user_id_str = str(user_id)
     activity = user_behavior.get(user_id_str, {"initial_count": 0})
     return activity["initial_count"] < MAX_INITIAL_MESSAGES
@@ -170,20 +163,15 @@ def is_first_message_critical(user_id: int) -> bool:
 
 # ================= Spam Detection Functions =================
 def rule_check(message_text: str, message_entities: list[MessageEntity] | None, user_id: int) -> (bool, str):
-    """Checks for obvious spam patterns using rules, applying stricter checks for new users."""
     
-    # Determine if a stricter check is needed
     is_critical_message = is_first_message_critical(user_id)
     
-    # --- Linguistic Enhancement: Unicode Normalization ---
     normalized_text = unidecode(message_text)
     text_lower = normalized_text.lower()
     
-    # Rule 1: Always block t.me or telegram.me links (Entity check covers this, but keep as fallback)
     if "t.me/" in text_lower or "telegram.me/" in text_lower:
         return True, "Promotion is not allowed here!"
 
-    # Rule 2: Block all other URLs if BLOCK_ALL_URLS is enabled (Stricter for critical messages)
     if BLOCK_ALL_URLS or is_critical_message:
         url_finder = re.compile(r"((?:https?://|www\.|t\.me/)\S+)", re.I)
         found_urls = url_finder.findall(text_lower)
@@ -192,7 +180,7 @@ def rule_check(message_text: str, message_entities: list[MessageEntity] | None, 
 
         for url in found_urls:
             if "t.me/" in url.lower() or "telegram.me/" in url.lower():
-                continue # Already handled above, skip re-checking
+                continue
 
             if not url.startswith(('http://', 'https://')):
                 temp_url = 'http://' + url
@@ -201,73 +189,56 @@ def rule_check(message_text: str, message_entities: list[MessageEntity] | None, 
 
             try:
                 parsed_url = urlparse(temp_url)
-                # The netloc (domain) or path (if no scheme, e.g., example.com/path)
                 domain = parsed_url.netloc.split(':')[0].lower().replace("www.", "")
                 
                 if not domain and parsed_url.path:
-                    # Catch cases like "example.com" which is parsed as path
                     domain = parsed_url.path.strip('/').split('/')[0].lower()
 
-                # If URL is found and its domain is NOT in the allowed list
                 if domain and domain not in allowed_domains_lower:
                     return True, "has sent a Link without authorization"
                     
             except Exception:
                 return True, "has sent a malformed URL"
 
-    # Rule 3: Excessive emojis
     if sum(c in SPAM_EMOJIS for c in message_text) > 5:
         return True, "sent excessive emojis"
 
-    # Rule 4: Suspicious keywords (checked against normalized text)
     if any(word in text_lower for word in SPAM_KEYWORDS):
         return True, "sent suspicious keywords (e.g., promo/join now)"
 
-    # Rule 5: Excessive Formatting (Pattern Detection)
     if message_entities:
         formatting_count = sum(1 for entity in message_entities if entity.type in FORMATTING_ENTITY_TYPES)
-        # Apply stricter check for shorter/critical messages
         text_length_limit = 200 if not is_critical_message else 100
         
         if formatting_count >= MAX_FORMATTING_ENTITIES and len(message_text) < text_length_limit:
             return True, "used excessive formatting/bolding (a common spam tactic)"
     
-    # Rule 6: Excessive Capitalization/Punctuation
     if len(re.findall(r'[A-Z]{3,}', message_text)) > 3 or len(re.findall(r'[!?]{3,}', message_text)) > 1:
         return True, "used excessive capitalization or punctuation"
     
-    # Rule 7: Flood Check (Behavioral)
     if is_flood_spam(user_id):
         return True, "is flooding the chat (too many messages too quickly)"
 
     return False, None
 
 def ml_check(message_text: str) -> bool:
-    """Uses a trained ML model to detect tricky spam."""
     if ML_MODEL and TFIDF_VECTORIZER:
-        # Process text using the same normalization as the rules
         processed_text = TFIDF_VECTORIZER.transform([unidecode(message_text)])
         prediction = ML_MODEL.predict(processed_text)[0]
-        # Assuming 1 means spam
         return prediction == 1
     return False
 
 def is_spam(message_text: str, message_entities: list[MessageEntity] | None, user_id: int) -> (bool, str):
-    """Hybrid spam detection combining rules and ML."""
     if not message_text:
         return False, None
 
-    # Layer 1: Rule-based check (includes flood check)
     is_rule_spam, reason = rule_check(message_text, message_entities, user_id)
     if is_rule_spam:
         return True, reason
 
-    # Layer 2: Machine learning check
     if ml_check(message_text):
-        # Apply ML model more strictly to new users
         if is_first_message_critical(user_id):
              return True, "sent a spam message (ML/First Message Flag)"
-        # Or, always allow ML check for high confidence spam
         return True, "sent a spam message (ML Model)"
         
     return False, None
@@ -293,9 +264,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = int(data[2])
 
     if action == "cancel_warn" or action == "unmute":
-        # Simplified: For production, you'd check admin permissions here.
         try:
-            admin_ids = [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]
+            chat_admins = await context.bot.get_chat_administrators(chat_id)
+            admin_ids = [admin.user.id for admin in chat_admins]
         except TelegramError:
             admin_ids = []
 
@@ -306,19 +277,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = await context.bot.get_chat_member(chat_id, user_id)
 
         if action == "unmute":
-            # Remove Mute restriction (allow all)
             await context.bot.restrict_chat_member(
                 chat_id=chat_id,
                 user_id=user_id,
                 permissions=ChatPermissions(can_send_messages=True, can_send_media_messages=True, can_send_polls=True, can_send_other_messages=True, can_add_web_page_previews=True, can_change_info=False, can_invite_users=True, can_pin_messages=False)
             )
-            # Clear warnings
             warnings[str(chat_id)].pop(str(user_id), None)
             save_all_data()
             await query.edit_message_text(f"✅ {user.user.first_name} has been unmuted and warnings cleared.")
 
         elif action == "cancel_warn":
-            # Clear warnings
             warnings[str(chat_id)].pop(str(user_id), None)
             save_all_data()
             await query.edit_message_text(f"❌ Warning for {user.user.first_name} has been cancelled.")
@@ -329,18 +297,17 @@ async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    load_all_data() # Ensure data is fresh
+    load_all_data()
     clean_expired_warnings()
     
     if not update.message or (not update.message.text and not update.message.caption):
-        return # Ignore non-text messages (unless they are media with promotion in caption, which we will check)
+        return
 
     user = update.message.from_user
     chat = update.effective_chat
     text = update.message.text or update.message.caption or ""
-    entities = update.message.entities or update.message.caption_entities # Get entities from text or caption
+    entities = update.message.entities or update.message.caption_entities
 
-    # Skip System bots & Admins
     if user.id in SYSTEM_BOT_IDS:
         return
         
@@ -353,11 +320,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id in admin_ids:
         return
         
-    # --- BEHAVIORAL TRACKING: Update user activity BEFORE checking for spam ---
-    # This is crucial for flood detection and first-message checks
     update_user_activity(user.id) 
 
-    # Unified function to handle and respond to spam/promotion
     async def handle_spam(reason_text: str):
         try:
             await update.message.delete()
@@ -367,7 +331,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         warn_count, expiry = add_warning(chat.id, user.id)
         expiry_str = datetime.fromisoformat(expiry).strftime("%d/%m/%Y %H:%M")
         
-        # User Display
         user_mention = f"<a href='tg://user?id={user.id}'>{html.escape(user.first_name)}</a>"
         user_display = f"{user_mention} (@{user.username})" if user.username else user_mention
 
@@ -387,7 +350,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{user.id}")]]
             if chat.id == ALLOWED_GROUP_ID:
-                # Mute the user for 1 day
                 until_date = datetime.now() + timedelta(days=1)
                 await context.bot.restrict_chat_member(
                     chat_id=chat.id,
@@ -408,24 +370,19 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Failed to send warning message: {e}")
 
 
-    # --- LAYER 1: ENTITY-BASED CHECK (The most precise promotion catch) ---
     if entities:
         for entity in entities:
-            # Case A: Check for Mentions (@channelname)
             if entity.type == MessageEntityType.MENTION:
                 mentioned_username = text[entity.offset:entity.offset + entity.length]
                 if mentioned_username:
                     try:
-                        # Fetch the chat to verify it's a channel/group mention, not just a user
                         mentioned_chat = await context.bot.get_chat(mentioned_username)
                         if mentioned_chat.type in [ChatType.CHANNEL, ChatType.GROUP, ChatType.SUPERGROUP]:
                             await handle_spam("Promotion not allowed (Channel/Group Mention)!")
                             return
                     except TelegramError:
-                        # Ignore if chat is private or doesn't exist
                         pass
             
-            # Case B: Check for embedded links (TEXT_LINK) or URL entities
             is_link_entity = entity.type in [MessageEntityType.URL, MessageEntityType.TEXT_LINK]
 
             if is_link_entity:
@@ -435,21 +392,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif entity.type == MessageEntityType.TEXT_LINK:
                     link_url = entity.url.lower()
 
-                # Rule: Block t.me or telegram.me links via entity check
                 if "t.me/" in link_url or "telegram.me/" in link_url:
                     await handle_spam("Promotion not allowed (Telegram Link Entity)!")
                     return
 
-    # --- LAYER 2: HYBRID SPAM CHECK (Rules + ML) ---
-    # This also includes the flood check and the rest of the URL/Keyword rules
     is_spam_message, reason = is_spam(text, entities, user.id)
     if is_spam_message:
         await handle_spam(reason)
         return
 
-    # --- LAYER 3: Username requirement (The old rule) ---
     if USERNAME_REQUIRED and not user.username:
-        # Note: You might want a softer warning/mute for this
         await handle_spam("in order to be accepted in the group, please set up a username")
         return
 
@@ -468,13 +420,25 @@ def ping():
 @app.route(WEBHOOK_PATH, methods=["POST"])
 async def telegram_webhook():
     """Route to receive updates from Telegram."""
-    # The request is handled asynchronously by the Application
     if request.json:
-        update = Update.de_json(cast(dict, request.json), application.bot)
-        await application.process_update(update)
+        # We must ensure the app is running before processing an update
+        if not application.running:
+             logger.warning("Application not running, skipping update.")
+             return "Application not running", 503
+             
+        # --- CRUCIAL: Added robust error handling ---
+        try:
+            update = Update.de_json(cast(dict, request.json), application.bot)
+            await application.process_update(update)
+        except Exception as e:
+            # Log error with full traceback for diagnostics, but return OK to Telegram.
+            logger.error(f"Error processing update: {e}", exc_info=True)
+            # CONTINUE to return "OK" to Telegram to prevent webhook from being disabled
+        # ---------------------------------------------
+            
     return "OK"
 
-# ================= Run Bot Server (The new fixed main logic) =================
+# ================= Run Bot Server (Final Webhook Logic) =================
 
 async def setup_bot_application():
     """Load model, register handlers, and initialize the application."""
@@ -482,18 +446,16 @@ async def setup_bot_application():
     
     load_all_data()
 
-    # Load the pre-trained ML model and vectorizer from disk
     try:
         TFIDF_VECTORIZER = joblib.load('models/vectorizer.joblib') 
         ML_MODEL = joblib.load('models/model.joblib')             
         logger.info("ML model loaded successfully from disk.")
     except Exception as e:
-        logger.warning(f"Failed to load ML model files (models/model.joblib or models/vectorizer.joblib): {e}")
-        logger.warning("Bot will operate in rule-based mode only (still highly effective).")
+        logger.warning(f"Failed to load ML model files: {e}")
+        logger.warning("Bot will operate in rule-based mode only.")
         ML_MODEL = None
         TFIDF_VECTORIZER = None
         
-    # --- Handler Registration ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*)$"))
     application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, message_handler))
@@ -501,7 +463,6 @@ async def setup_bot_application():
         filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
         handle_status_updates
     ))
-    # --- End Handler Registration ---
     
     await application.initialize()
     await application.start()
@@ -525,30 +486,19 @@ async def setup_webhook():
 
 async def serve_app():
     """Starts the Hypercorn server to serve the Flask app and webhooks."""
-    # Hypercorn is needed to run an ASGI/WSGI app asynchronously
-    from hypercorn.asyncio import serve
-    from hypercorn.config import Config
-    
     config = Config()
-    # Binding to 0.0.0.0 and the configured PORT is crucial for Render to detect the open port
     config.bind = [f"0.0.0.0:{PORT}"]
-    config.access_log_format = "%(h)s %(r)s %(s)s %(b)s"
     
     await serve(app, config)
     
 async def run_bot_server():
     """The main entry point for the bot in Webhook mode."""
-    # 1. Setup bot, load models, register handlers, start internal processes
     await setup_bot_application()
-    
-    # 2. Set the webhook on Telegram
     await setup_webhook()
 
-    # 3. Start the web server to listen for incoming updates
     try:
         await serve_app()
     finally:
-        # 4. Gracefully shut down
         await application.stop()
         save_all_data()
         logger.info("Bot server shut down gracefully.")
@@ -556,11 +506,15 @@ async def run_bot_server():
 
 def main():
     try:
+        if os.name == 'nt':
+             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+             
         asyncio.run(run_bot_server())
     except KeyboardInterrupt:
         logger.info("Bot shut down gracefully via interrupt.")
     except Exception as e:
-        logger.error(f"Fatal error in main: {e}")
+        # Catch any exceptions that might crash the entire server
+        logger.error(f"Fatal error in main loop: {e}", exc_info=True)
 
 if __name__ == '__main__':
     main()
