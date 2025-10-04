@@ -7,10 +7,10 @@ import html
 import joblib
 import time
 from datetime import datetime, timedelta
-from flask import Flask
-# --- NEW REQUIRED IMPORT ---
+# --- New Import ---
+from flask import Flask, request
+# ------------------
 from unidecode import unidecode
-# ---------------------------
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ChatPermissions, Bot, MessageEntity
@@ -18,18 +18,17 @@ from telegram import (
 from telegram.constants import ParseMode, ChatType, MessageEntityType
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    CallbackQueryHandler, ContextTypes, filters, Application
 )
 from telegram.error import TelegramError
 from urllib.parse import urlparse
+from typing import cast # For type hinting the request body
 
 # ================= Configuration =================
 # Set your token here if you don't use environment variables, but ENV is recommended
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     print("FATAL: TOKEN environment variable not set. Please set it to your bot token.")
-    # Exiting here is safer than running with no token, for a real bot.
-    # raise ValueError("TOKEN environment variable is missing.")
 
 CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
@@ -43,6 +42,12 @@ BEHAVIOR_FILE = "user_behavior.json"
 
 SYSTEM_BOT_IDS = [136817688, 1087968824]
 USERNAME_REQUIRED = False
+
+# === WEBHOOK CONFIGURATION (New) ===
+# RENDER_EXTERNAL_URL (or similar) must be set to this in your environment
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
+WEBHOOK_PATH = "/botupdates" # The endpoint for Telegram to send updates to
+# ===================================
 
 # === URL Blocking Control ===
 BLOCK_ALL_URLS = False
@@ -58,12 +63,12 @@ SPAM_EMOJIS = {"😀", "😂", "🔥", "💯", "😍", "❤️", "🥳", "🎉",
 FORMATTING_ENTITY_TYPES = {
     MessageEntityType.BOLD, MessageEntityType.ITALIC, MessageEntityType.CODE,
     MessageEntityType.UNDERLINE, MessageEntityType.STRIKETHROUGH, MessageEntityType.SPOILER,
-    MessageEntityType.PRE, MessageEntityType.BLOCKQUOTE # Added Blockquote
+    MessageEntityType.PRE, MessageEntityType.BLOCKQUOTE
 }
-MAX_FORMATTING_ENTITIES = 5      # Max allowed formatting entities
-MAX_INITIAL_MESSAGES = 3         # Stricter checks for first X messages
-FLOOD_INTERVAL = 5               # Seconds
-FLOOD_MESSAGE_COUNT = 3          # Max messages in FLOOD_INTERVAL seconds
+MAX_FORMATTING_ENTITIES = 5
+MAX_INITIAL_MESSAGES = 3
+FLOOD_INTERVAL = 5
+FLOOD_MESSAGE_COUNT = 3
 
 # ================= Global Variables for ML Model/User Data =================
 ML_MODEL = None
@@ -267,22 +272,12 @@ def is_spam(message_text: str, message_entities: list[MessageEntity] | None, use
         
     return False, None
 
-# ================= Flask App (for deployment) =================
+# ================= Flask App (for deployment) & Bot Setup =================
 app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Bot is alive ✅"
-
-@app.route("/ping")
-def ping():
-    return "OK"
-
-# ================= Bot Setup =================
 bot = Bot(TOKEN)
 application = ApplicationBuilder().bot(bot).build()
 
-# ================= Handlers (Placeholder for other essential handlers) =================
+# ================= Handlers =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Welcome! I am an anti-spam bot. Use /help to see my commands."
@@ -330,8 +325,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This is where you would typically handle /start (if it was a private message)
-    # and new member joins/leaves (not part of spam detection core logic, so simplified)
     pass
 
 
@@ -460,16 +453,37 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_spam("in order to be accepted in the group, please set up a username")
         return
 
+# ================= Flask Routes for Webhooks and Health Checks =================
 
-# ================= Run Bot =================
-async def run_bot():
+@app.route("/", methods=["GET"])
+def home():
+    """Health check route."""
+    return "Bot is alive ✅"
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    """Health check route."""
+    return "OK"
+
+@app.route(WEBHOOK_PATH, methods=["POST"])
+async def telegram_webhook():
+    """Route to receive updates from Telegram."""
+    # The request is handled asynchronously by the Application
+    if request.json:
+        update = Update.de_json(cast(dict, request.json), application.bot)
+        await application.process_update(update)
+    return "OK"
+
+# ================= Run Bot Server (The new fixed main logic) =================
+
+async def setup_bot_application():
+    """Load model, register handlers, and initialize the application."""
     global ML_MODEL, TFIDF_VECTORIZER
     
     load_all_data()
 
     # Load the pre-trained ML model and vectorizer from disk
     try:
-        # ** THIS IS THE CRITICAL FIX: CHANGING PATH TO INCLUDE 'models/' **
         TFIDF_VECTORIZER = joblib.load('models/vectorizer.joblib') 
         ML_MODEL = joblib.load('models/model.joblib')             
         logger.info("ML model loaded successfully from disk.")
@@ -478,7 +492,8 @@ async def run_bot():
         logger.warning("Bot will operate in rule-based mode only (still highly effective).")
         ML_MODEL = None
         TFIDF_VECTORIZER = None
-
+        
+    # --- Handler Registration ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*)$"))
     application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, message_handler))
@@ -486,24 +501,66 @@ async def run_bot():
         filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
         handle_status_updates
     ))
+    # --- End Handler Registration ---
+    
+    await application.initialize()
+    await application.start()
 
-    # The rest of the setup is for standard web/polling deployment
+async def setup_webhook():
+    """Sets the webhook on Telegram."""
+    if not WEBHOOK_URL:
+        logger.error("FATAL: WEBHOOK_URL environment variable is not set. Cannot run in Webhook mode.")
+        return False
+        
+    full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    
+    logger.info(f"Setting webhook to {full_url} on port {PORT}")
     try:
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
-        logger.info("Bot is running in polling mode.")
-        await asyncio.Event().wait()
-    except Exception as e:
-        logger.error(f"Bot failed to start: {e}")
+        await application.bot.set_webhook(url=full_url)
+        logger.info("Webhook set successfully.")
+        return True
+    except TelegramError as e:
+        logger.error(f"Failed to set webhook: {e}")
+        return False
+
+async def serve_app():
+    """Starts the Hypercorn server to serve the Flask app and webhooks."""
+    # Hypercorn is needed to run an ASGI/WSGI app asynchronously
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
+    
+    config = Config()
+    # Binding to 0.0.0.0 and the configured PORT is crucial for Render to detect the open port
+    config.bind = [f"0.0.0.0:{PORT}"]
+    config.access_log_format = "%(h)s %(r)s %(s)s %(b)s"
+    
+    await serve(app, config)
+    
+async def run_bot_server():
+    """The main entry point for the bot in Webhook mode."""
+    # 1. Setup bot, load models, register handlers, start internal processes
+    await setup_bot_application()
+    
+    # 2. Set the webhook on Telegram
+    await setup_webhook()
+
+    # 3. Start the web server to listen for incoming updates
+    try:
+        await serve_app()
+    finally:
+        # 4. Gracefully shut down
+        await application.stop()
+        save_all_data()
+        logger.info("Bot server shut down gracefully.")
+
 
 def main():
     try:
-        asyncio.run(run_bot())
+        asyncio.run(run_bot_server())
     except KeyboardInterrupt:
-        logger.info("Bot shut down gracefully.")
-    finally:
-        save_all_data() # Save the final state of warnings and behavior
+        logger.info("Bot shut down gracefully via interrupt.")
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}")
 
 if __name__ == '__main__':
     main()
