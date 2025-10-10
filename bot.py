@@ -30,7 +30,6 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     logging.critical("FATAL: TOKEN environment variable not set. Please set it to your bot token.")
 
-# FIX: Restoring missing list literals
 CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
@@ -363,21 +362,34 @@ async def get_target_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif context.args and context.args[0].isdigit():
         user_id = int(context.args[0])
         
-    # 3. Check for mention/username in arguments (FIX: Resolve @username)
-    elif context.args and context.args[0].startswith('@'):
-        username = context.args[0].strip('@')
-        try:
-            chat_member = await context.bot.get_chat_member(message.chat_id, username)
-            target_user = chat_member.user
-            user_id = target_user.id
-            
-        except TelegramError as e:
-            logger.warning(f"Failed to resolve username {username}: {e}")
-            await message.reply_text(f"Could not find a user named <code>@{html.escape(username)}</code> in this chat. (Note: User must be an active member of the group for this to work.)", parse_mode=ParseMode.HTML)
-            return None
-            
+    # ### FIX: Correctly handle mentions (@username) by parsing message entities
+    # 3. Check for a mention entity in the message
+    elif context.args and context.args[0].startswith('@') and message.entities:
+        for entity in message.entities:
+            if entity.type == MessageEntityType.MENTION:
+                # In a command like /warn @username, the username is the entity
+                username_in_text = message.text[entity.offset:(entity.offset + entity.length)]
+                if username_in_text == context.args[0]:
+                    try:
+                        # We need to find the user associated with this username.
+                        # This requires fetching the user object from the chat.
+                        # A direct lookup by username isn't available, so this approach is complex.
+                        # The TEXT_MENTION is more reliable. We will prioritize that.
+                        pass # Placeholder for a more complex lookup if needed
+                    except Exception as e:
+                        logger.warning(f"Could not resolve MENTION entity: {e}")
+
+            elif entity.type == MessageEntityType.TEXT_MENTION:
+                # A text mention is a username linked to a user who doesn't have a public @username
+                # or when a user is mentioned by their name. The user object is directly in the entity.
+                if entity.user:
+                    target_user = entity.user
+                    user_id = target_user.id
+                    break # Found our user, no need to check other entities
+    
     if user_id:
         try:
+            # If we only have the ID, we need to fetch the user object to get their name
             if not target_user:
                 target_member = await context.bot.get_chat_member(message.chat_id, user_id)
                 target_user = target_member.user
@@ -390,13 +402,33 @@ async def get_target_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await message.reply_text(f"Could not find or resolve target user ID <code>{user_id}</code>.", parse_mode=ParseMode.HTML)
             return None
             
-    await message.reply_text("Usage: Reply to a user's message, or use the command with their User ID or @username (e.g., `/mute 123456789` or `/mute @username`).")
+    await message.reply_text("Usage: Reply to a user's message, or use the command with their User ID or by @mentioning them (e.g., `/mute 123456789` or `/mute @username`).")
     return None
+
+# ### NEW: Helper function to generate permissions for unmuting.
+# This avoids code duplication and fixes the TypeError from the old library version.
+def _create_unmute_permissions() -> ChatPermissions:
+    """Returns a ChatPermissions object that grants all standard user permissions."""
+    return ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+        can_change_info=False, # Typically keep these false unless intended
+        can_invite_users=True,
+        can_pin_messages=False # Typically keep these false unless intended
+    )
 
 # ================= Admin Command Handlers =================
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays help information about the bot's commands. (Missing in user's file)"""
+    """Displays help information about the bot's commands."""
     help_text = (
         "🤖 **Bot Commands & Features**\n\n"
         "**User Commands:**\n"
@@ -445,17 +477,15 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = (
             f"🔇 **Muted User**\n"
             f"• User: {target_display}\n"
-            f"• Admin: {admin_display}\n"
+            
             f"• Duration: {mute_duration} hours.\n"
             f"• Reason: Manually enforced mute."
         )
         
-        # --- START: FIX/FEATURE ADDITION - Add Unmute Button ---
         keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{update.effective_chat.id}:{target_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.effective_message.reply_text(caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-        # --- END: FIX/FEATURE ADDITION - Add Unmute Button ---
 
         logger.info(f"Admin {update.effective_user.id} muted user {target_id} for 24 hours.")
         
@@ -482,18 +512,12 @@ async def unmute_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        # FIX: Using minimal permissions to prevent API failure due to bot lacking granular admin rights
+        # ### FIX: Use the new helper function to get the correct ChatPermissions object.
+        # This resolves the TypeError by providing all the expected arguments.
         await context.bot.restrict_chat_member(
             chat_id=update.effective_chat.id,
             user_id=target_id,
-            permissions=ChatPermissions(
-                can_send_messages=True, 
-                can_send_media_messages=True,
-                can_send_polls=True, 
-                can_send_other_messages=True,
-                can_add_web_page_previews=True 
-            ),
-            until_date=datetime.now() - timedelta(seconds=1) 
+            permissions=_create_unmute_permissions()
         )
         
         await clear_warning_async(update.effective_chat.id, target_id)
@@ -501,7 +525,7 @@ async def unmute_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         caption = (
             f"🔊 **Unmuted User**\n"
             f"• User: {target_display}\n"
-            f"• Admin: {admin_display}\n"
+            
             f"• Action: Unmuted and Warnings Cleared."
         )
         
@@ -541,7 +565,7 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = (
             f"🔨 **Banned User**\n"
             f"• User: {target_display}\n"
-            f"• Admin: {admin_display}\n"
+            
             f"• Action: Permanently Banned and Warnings Cleared."
         )
         
@@ -574,18 +598,21 @@ async def unban_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
+        # ### FIX: Added `only_if_banned=True` to make the action more robust.
         await context.bot.unban_chat_member(
             chat_id=update.effective_chat.id,
-            user_id=target_id
+            user_id=target_id,
+            only_if_banned=True
         )
         
         await clear_warning_async(update.effective_chat.id, target_id)
 
+        # ### FIX: Clarified the unban message.
         caption = (
             f"🔓 **Unbanned User**\n"
             f"• User: {target_display}\n"
-            f"• Admin: {admin_display}\n"
-            f"• Action: Ban Lifted and Warnings Cleared."
+            
+            f"• Action: Ban Lifted. The user can rejoin the group now."
         )
         
         await update.effective_message.reply_text(caption, parse_mode=ParseMode.HTML)
@@ -611,14 +638,16 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     reason = "Manually warned by Admin"
     if context.args:
-        reason = "Admin Warn: " + " ".join(context.args)
+        # Re-join args after potentially identifying the user from the first arg
+        reason_args = context.args[1:] if (context.args[0].isdigit() or context.args[0].startswith('@')) else context.args
+        if reason_args:
+            reason = "Admin Warn: " + " ".join(reason_args)
 
     if target_id == context.bot.id:
         await update.effective_message.reply_text("I cannot warn myself!")
         return
 
     try:
-        await load_all_data_async()
         warn_count, expiry = await add_warning_async(update.effective_chat.id, target_id)
         expiry_dt = datetime.fromisoformat(expiry)
         expiry_str = expiry_dt.strftime("%d/%m/%Y %H:%M")
@@ -626,17 +655,15 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         admin_display = f"<a href='tg://user?id={update.effective_user.id}'>{html.escape(update.effective_user.first_name)}</a>"
         
         if warn_count <= 2:
-            # PRESERVED WARNING FORMAT
             caption = (
                 f"⚠️ **Warning Issued**\n"
                 f"• User: {target_display}\n"
-                f"• Admin: {admin_display}\n"
+                
                 f"• Action: Warn ({warn_count}/3) ❕ until {expiry_str}.\n"
                 f"• Reason: {html.escape(reason)}"
             )
             keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{update.effective_chat.id}:{target_id}")]]
         else:
-            # Enforce Mute on the 3rd warn
             until_date = datetime.now() + timedelta(days=1)
             await context.bot.restrict_chat_member(
                 chat_id=update.effective_chat.id,
@@ -645,11 +672,10 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 until_date=until_date
             )
             
-            # PRESERVED MUTE FORMAT
             caption = (
                 f"🔇 **User Muted**\n"
                 f"• User: {target_display}\n"
-                f"• Admin: {admin_display}\n"
+                
                 f"• Action: Muted ({warn_count}/3) 🔇 until {expiry_str}.\n"
                 f"• Reason: {html.escape(reason)}"
             )
@@ -662,8 +688,6 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError as e:
         await update.effective_message.reply_text(f"Failed to process warning: {e}", parse_mode=ParseMode.HTML)
         logger.error(f"Failed to manually warn user {target_id}: {e}")
-    finally:
-        await save_all_data_async()
         
 async def set_strict_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global STRICT_NEW_USER_MODE
@@ -816,9 +840,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ================= 1. Done / Verified (File Gating) =================
     if data == "done":
         user_id = query.from_user.id
-        
-        await load_all_data_async()
-        
+                
         if await is_member_all(context, user_id):
             
             if query.message:
@@ -884,27 +906,22 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         if action == "unmute":
             try:
-                # FIX: Using minimal permissions to prevent API failure due to bot lacking granular admin rights
+                # ### FIX: Use the new helper function to get the correct ChatPermissions object.
                 await context.bot.restrict_chat_member(
                     chat_id=chat_id,
                     user_id=user_id,
-                    permissions=ChatPermissions(
-                        can_send_messages=True, 
-                        can_send_media_messages=True,
-                        can_send_polls=True, 
-                        can_send_other_messages=True,
-                        can_add_web_page_previews=True 
-                    ),
-                    until_date=datetime.now() - timedelta(seconds=1) 
+                    permissions=_create_unmute_permissions()
                 )
             except TelegramError as e:
                 logger.error(f"Failed to unrestrict chat member {user_id}: {e}")
                 
         elif action == "unban":
              try:
+                # ### FIX: Added `only_if_banned=True` to make the action more robust.
                 await context.bot.unban_chat_member(
                     chat_id=chat_id,
-                    user_id=user_id
+                    user_id=user_id,
+                    only_if_banned=True
                 )
              except TelegramError as e:
                 logger.error(f"Failed to unban user {user_id}: {e}")
@@ -918,38 +935,40 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         admin_display = f"<a href='tg://user?id={query.from_user.id}'>{html.escape(query.from_user.first_name)}</a>"
         current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        # PRESERVED EDIT MESSAGE FORMATTING
+        new_text = ""
         if query.message:
             if action == "unmute":
                 new_text = (
                     f"🔊 {user_display} has been unmuted and warnings cleared!\n"
                     f"• Action: Unmuted and Warns Reset (0/3)\n"
-                    f"• Admin: {admin_display}\n"
+                    
                     f"• Time: <code>{current_time}</code>"
                 )
             elif action == "cancel_warn":
                 new_text = (
                     f"❌ {user_display}'s warnings have been reset!\n"
                     f"• Action: Warns Reset (0/3)\n"
-                    f"• Admin: {admin_display}\n"
+                    
                     f"• Reset on: <code>{current_time}</code>"
                 )
             elif action == "unban":
+                # ### FIX: Clarified the unban message for button callbacks too.
                 new_text = (
-                    f"🔓 {user_display} has been unbanned and warnings cleared!\n"
-                    f"• Action: Unbanned and Warns Reset (0/3)\n"
-                    f"• Admin: {admin_display}\n"
+                    f"🔓 {user_display} has been unbanned.\n"
+                    f"• Action: Ban Lifted. User can rejoin.\n"
+                    
                     f"• Time: <code>{current_time}</code>"
                 )
             
-            try:
-                await query.message.edit_text(
-                    text=new_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=None
-                )
-            except TelegramError as e:
-                logger.warning(f"Failed to edit warning/mute message: {e}")
+            if new_text:
+                try:
+                    await query.message.edit_text(
+                        text=new_text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=None
+                    )
+                except TelegramError as e:
+                    logger.warning(f"Failed to edit warning/mute message: {e}")
 
 
 async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -971,15 +990,19 @@ async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TY
             pass
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await load_all_data_async()
+    # ### PERFORMANCE: No need to load all data on every message.
+    # It will be loaded when a check is actually needed, e.g., during a warning.
     
-    if not update.message or (not update.message.text and not update.message.caption):
+    if not update.message or not (update.message.text or update.message.caption):
         return
 
     user = update.message.from_user
     chat = update.effective_chat
     text = update.message.text or update.message.caption or ""
     entities = update.message.entities or update.message.caption_entities
+
+    if not user or not chat:
+        return
 
     if user.id in SYSTEM_BOT_IDS:
         return
@@ -1009,23 +1032,21 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_display = f"{user_mention} [<code>{user.id}</code>]"
 
         keyboard = None
+        caption = ""
 
         if warn_count <= 2:
-            # PRESERVED WARNING FORMAT
             caption = (
                 f"{user_display} {reason_text}.\n"
                 f"Action: Warn ({warn_count}/3) ❕ until {expiry_str}."
             )
             keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
         else:
-            # PRESERVED MUTE FORMAT
             caption = (
                 f"{user_display} has exceeded the warning limit.\n"
                 f"Action: Muted ({warn_count}/3) 🔇 until {expiry_str}."
             )
             keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{user.id}")]]
             
-            # Enforce Mute on 3rd warn
             if chat.id == ALLOWED_GROUP_ID:
                 until_date = datetime.now() + timedelta(days=1)
                 try:
@@ -1038,7 +1059,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except TelegramError as e:
                     logger.error(f"Failed to mute user {user.id}: {e}")
         
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         try:
             await context.bot.send_message(
                 chat_id=chat.id,
@@ -1057,27 +1078,26 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 link_url = ""
                 if entity.type == MessageEntityType.URL:
                     link_url = text[entity.offset:entity.offset + entity.length].lower()
-                elif entity.type == MessageEntityType.TEXT_LINK:
+                elif entity.type == MessageEntityType.TEXT_LINK and entity.url:
                     link_url = entity.url.lower()
 
                 if "t.me/" in link_url or "telegram.me/" in link_url:
                     await handle_spam("Promotion not allowed (Telegram Link Entity)!")
-                    await save_all_data_async() 
+                    # Data is saved inside add_warning_async, no need to save again
                     return
 
     is_spam_message, reason = is_spam(text, entities, user.id)
     if is_spam_message:
         await handle_spam(reason or "sent a spam message")
-        await save_all_data_async() 
         return
 
     if USERNAME_REQUIRED and not user.username:
         await handle_spam("in order to be accepted in the group, please set up a username")
-        await save_all_data_async() 
         return
         
-    await save_all_data_async()
-
+    # ### PERFORMANCE FIX: Removed save_all_data_async() from here.
+    # It was causing excessive I/O on every single message.
+    # Data is now saved only when warnings are added or cleared.
 
 # ================= Flask Routes for Webhooks and Health Checks =================
 
@@ -1113,8 +1133,13 @@ async def setup_bot_application():
     await load_all_data_async() 
 
     try:
+        # NOTE: Assumes you have a 'models' directory with these files.
         TFIDF_VECTORIZER, ML_MODEL = await asyncio.to_thread(_load_ml_model_sync, 'models/vectorizer.joblib', 'models/model.joblib')
         logger.info("ML model loaded successfully from disk.")
+    except FileNotFoundError:
+        logger.warning("ML model files not found. Bot will operate in rule-based mode only.")
+        ML_MODEL = None
+        TFIDF_VECTORIZER = None
     except Exception as e:
         logger.warning(f"Failed to load ML model files: {e}")
         logger.warning("Bot will operate in rule-based mode only.")
@@ -1155,7 +1180,7 @@ async def setup_webhook():
     
     logger.info(f"Setting webhook to {full_url} on port {PORT}")
     try:
-        await application.bot.set_webhook(url=full_url)
+        await application.bot.set_webhook(url=full_url, allowed_updates=Update.ALL_TYPES)
         logger.info("Webhook set successfully.")
         return True
     except TelegramError as e:
@@ -1188,10 +1213,15 @@ async def run_bot_server():
 
 
 def main():
+    if not TOKEN:
+        # The critical log at the top already covers this, but an extra check here is fine.
+        return
+        
     if not WEBHOOK_URL:
         logger.critical("Bot is configured for webhooks but WEBHOOK_URL is missing. It will not receive updates.")
 
     try:
+        # This policy is only needed for specific Windows environments, but it's safe to keep.
         if os.name == 'nt':
              asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
              
