@@ -30,7 +30,7 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     logging.critical("FATAL: TOKEN environment variable not set. Please set it to your bot token.")
 
-# FIX: Restoring list literals needed for channel checks
+# FIX: Restoring missing list literals
 CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
@@ -74,7 +74,7 @@ FLOOD_MESSAGE_COUNT = 3
 STRICT_NEW_USER_MODE = False 
 
 # === NEW FEATURE TOGGLES ===
-ENABLE_ML_SPAM_CHECK = True # Re-added: Toggle for ML Model check
+ENABLE_ML_SPAM_CHECK = True 
 # ================= Global Variables for ML Model/User Data =================
 ML_MODEL = None
 TFIDF_VECTORIZER = None
@@ -292,9 +292,9 @@ def rule_check(message_text: str, message_entities: list[MessageEntity] | None, 
 
 def ml_check(message_text: str) -> bool:
     """Uses a trained ML model to detect tricky spam. Relies on global data."""
-    global ENABLE_ML_SPAM_CHECK # Re-added: Needs the global toggle
+    global ENABLE_ML_SPAM_CHECK 
     
-    if not ENABLE_ML_SPAM_CHECK: # Re-added: Needs the global toggle
+    if not ENABLE_ML_SPAM_CHECK: 
         return False
         
     if ML_MODEL and TFIDF_VECTORIZER:
@@ -346,7 +346,6 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 async def get_target_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[tuple[int, str]]:
     """
     Identifies the target user ID and their display name from a command.
-    FIXED: Now correctly handles replies, raw IDs, AND @usernames.
     """
     message = update.effective_message
     if not message or not message.chat_id:
@@ -368,14 +367,13 @@ async def get_target_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif context.args and context.args[0].startswith('@'):
         username = context.args[0].strip('@')
         try:
-            # Re-added: Logic to resolve username to ID via API call
             chat_member = await context.bot.get_chat_member(message.chat_id, username)
             target_user = chat_member.user
             user_id = target_user.id
             
         except TelegramError as e:
             logger.warning(f"Failed to resolve username {username}: {e}")
-            await message.reply_text(f"Could not find a user named <code>@{html.escape(username)}</code> in this chat.", parse_mode=ParseMode.HTML)
+            await message.reply_text(f"Could not find a user named <code>@{html.escape(username)}</code> in this chat. (Note: User must be an active member of the group for this to work.)", parse_mode=ParseMode.HTML)
             return None
             
     if user_id:
@@ -409,9 +407,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/mute [username/ID]`: Mute a user for 24 hours.\n"
         "• `/unmute [username/ID]`: Unmute a restricted user and clear their warnings. (Also works via button).\n"
         "• `/ban [username/ID]`: Permanently ban a user. (Also works via button).\n"
-        "• `/unban [username/ID]`: Unban a user and clear their warnings. (Re-added)\n"
+        "• `/unban [username/ID]`: Unban a user and clear their warnings.\n"
         "• `/set_strict_mode [on/off]`: Toggle strict link/spam checks for new users.\n"
-        "• `/set_ml_check [on/off]`: Toggle the Machine Learning spam detection model. (Re-added)"
+        "• `/set_ml_check [on/off]`: Toggle the Machine Learning spam detection model."
     )
     await update.effective_message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -447,11 +445,18 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = (
             f"🔇 **Muted User**\n"
             f"• User: {target_display}\n"
+            f"• Admin: {admin_display}\n"
             f"• Duration: {mute_duration} hours.\n"
             f"• Reason: Manually enforced mute."
         )
         
-        await update.effective_message.reply_text(caption, parse_mode=ParseMode.HTML)
+        # --- START: FIX/FEATURE ADDITION - Add Unmute Button ---
+        keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{update.effective_chat.id}:{target_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.effective_message.reply_text(caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        # --- END: FIX/FEATURE ADDITION - Add Unmute Button ---
+
         logger.info(f"Admin {update.effective_user.id} muted user {target_id} for 24 hours.")
         
     except TelegramError as e:
@@ -459,7 +464,6 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to mute user {target_id}: {e}")
 
 async def unmute_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Renamed from 'unmute_user' for clarity and to match previous revisions
     if not update.effective_chat or update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
 
@@ -478,14 +482,16 @@ async def unmute_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
+        # FIX: Using minimal permissions to prevent API failure due to bot lacking granular admin rights
         await context.bot.restrict_chat_member(
             chat_id=update.effective_chat.id,
             user_id=target_id,
             permissions=ChatPermissions(
-                can_send_messages=True, can_send_media_messages=True,
-                can_send_polls=True, can_send_other_messages=True,
-                can_add_web_page_previews=True, can_change_info=False,
-                can_invite_users=True, can_pin_messages=False 
+                can_send_messages=True, 
+                can_send_media_messages=True,
+                can_send_polls=True, 
+                can_send_other_messages=True,
+                can_add_web_page_previews=True 
             ),
             until_date=datetime.now() - timedelta(seconds=1) 
         )
@@ -495,7 +501,7 @@ async def unmute_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         caption = (
             f"🔊 **Unmuted User**\n"
             f"• User: {target_display}\n"
-            
+            f"• Admin: {admin_display}\n"
             f"• Action: Unmuted and Warnings Cleared."
         )
         
@@ -503,7 +509,7 @@ async def unmute_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info(f"Admin {update.effective_user.id} unmuted user {target_id}.")
         
     except TelegramError as e:
-        await update.effective_message.reply_text(f"Failed to unmute user: {e}", parse_mode=ParseMode.HTML)
+        await update.effective_message.reply_text(f"Failed to unmute user. Check bot permissions (e.g., 'Restrict Members'): {e}", parse_mode=ParseMode.HTML)
         logger.error(f"Failed to unmute user {target_id}: {e}")
         
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -535,11 +541,10 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = (
             f"🔨 **Banned User**\n"
             f"• User: {target_display}\n"
-            
+            f"• Admin: {admin_display}\n"
             f"• Action: Permanently Banned and Warnings Cleared."
         )
         
-        # Re-added: Add Unban button
         keyboard = [[InlineKeyboardButton("↩️ Unban", callback_data=f"unban:{update.effective_chat.id}:{target_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -551,7 +556,6 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to ban user {target_id}: {e}")
 
 async def unban_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Re-added: New /unban command
     if not update.effective_chat or update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
 
@@ -580,7 +584,7 @@ async def unban_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         caption = (
             f"🔓 **Unbanned User**\n"
             f"• User: {target_display}\n"
-            
+            f"• Admin: {admin_display}\n"
             f"• Action: Ban Lifted and Warnings Cleared."
         )
         
@@ -626,7 +630,7 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption = (
                 f"⚠️ **Warning Issued**\n"
                 f"• User: {target_display}\n"
-                
+                f"• Admin: {admin_display}\n"
                 f"• Action: Warn ({warn_count}/3) ❕ until {expiry_str}.\n"
                 f"• Reason: {html.escape(reason)}"
             )
@@ -645,7 +649,7 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption = (
                 f"🔇 **User Muted**\n"
                 f"• User: {target_display}\n"
-                
+                f"• Admin: {admin_display}\n"
                 f"• Action: Muted ({warn_count}/3) 🔇 until {expiry_str}.\n"
                 f"• Reason: {html.escape(reason)}"
             )
@@ -695,7 +699,6 @@ async def set_strict_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Admin {update.effective_user.id} set STRICT_NEW_USER_MODE to {STRICT_NEW_USER_MODE}")
 
 async def set_ml_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Re-added: New command to control ML check
     global ENABLE_ML_SPAM_CHECK 
     
     if not update.effective_chat or update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
@@ -861,7 +864,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
     # ================= 2. Cancel Warn / Unmute / Unban (Admin Actions - Inline) =================
-    # Re-added: unban callback pattern
     elif data.startswith("cancel_warn:") or data.startswith("unmute:") or data.startswith("unban:"):
         action, chat_id_str, user_id_str = data.split(":")
         chat_id = int(chat_id_str)
@@ -882,15 +884,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         if action == "unmute":
             try:
-                # Explicitly unrestrict the user
+                # FIX: Using minimal permissions to prevent API failure due to bot lacking granular admin rights
                 await context.bot.restrict_chat_member(
                     chat_id=chat_id,
                     user_id=user_id,
                     permissions=ChatPermissions(
-                        can_send_messages=True, can_send_media_messages=True,
-                        can_send_polls=True, can_send_other_messages=True,
-                        can_add_web_page_previews=True, can_change_info=False,
-                        can_invite_users=True, can_pin_messages=False 
+                        can_send_messages=True, 
+                        can_send_media_messages=True,
+                        can_send_polls=True, 
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True 
                     ),
                     until_date=datetime.now() - timedelta(seconds=1) 
                 )
@@ -899,7 +902,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
         elif action == "unban":
              try:
-                # Re-added: Unban (lift the ban)
                 await context.bot.unban_chat_member(
                     chat_id=chat_id,
                     user_id=user_id
@@ -922,21 +924,21 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 new_text = (
                     f"🔊 {user_display} has been unmuted and warnings cleared!\n"
                     f"• Action: Unmuted and Warns Reset (0/3)\n"
-                    
+                    f"• Admin: {admin_display}\n"
                     f"• Time: <code>{current_time}</code>"
                 )
             elif action == "cancel_warn":
                 new_text = (
                     f"❌ {user_display}'s warnings have been reset!\n"
                     f"• Action: Warns Reset (0/3)\n"
-                    
+                    f"• Admin: {admin_display}\n"
                     f"• Reset on: <code>{current_time}</code>"
                 )
             elif action == "unban":
                 new_text = (
                     f"🔓 {user_display} has been unbanned and warnings cleared!\n"
                     f"• Action: Unbanned and Warns Reset (0/3)\n"
-                    
+                    f"• Admin: {admin_display}\n"
                     f"• Time: <code>{current_time}</code>"
                 )
             
@@ -1121,17 +1123,17 @@ async def setup_bot_application():
         
     # Add handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command)) # Re-added missing help command
+    application.add_handler(CommandHandler("help", help_command)) 
     
     application.add_handler(CommandHandler("mute", mute_user, filters=filters.ChatType.GROUPS))
-    application.add_handler(CommandHandler("unmute", unmute_user_command, filters=filters.ChatType.GROUPS)) # Corrected function call
+    application.add_handler(CommandHandler("unmute", unmute_user_command, filters=filters.ChatType.GROUPS)) 
     application.add_handler(CommandHandler("ban", ban_user, filters=filters.ChatType.GROUPS))
-    application.add_handler(CommandHandler("unban", unban_user_command, filters=filters.ChatType.GROUPS)) # Re-added missing unban command
+    application.add_handler(CommandHandler("unban", unban_user_command, filters=filters.ChatType.GROUPS)) 
     application.add_handler(CommandHandler("warn", warn_user_command, filters=filters.ChatType.GROUPS))
     application.add_handler(CommandHandler("set_strict_mode", set_strict_mode, filters=filters.ChatType.GROUPS)) 
-    application.add_handler(CommandHandler("set_ml_check", set_ml_check, filters=filters.ChatType.GROUPS)) # Re-added missing set_ml_check command
+    application.add_handler(CommandHandler("set_ml_check", set_ml_check, filters=filters.ChatType.GROUPS)) 
 
-    application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*|unban:.*)$")) # Re-added unban pattern
+    application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*|unban:.*)$")) 
     application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, message_handler))
     application.add_handler(MessageHandler(
         filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
