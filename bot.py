@@ -73,7 +73,7 @@ FLOOD_MESSAGE_COUNT = 3
 STRICT_NEW_USER_MODE = False 
 
 # === NEW FEATURE TOGGLES ===
-ENABLE_ML_SPAM_CHECK = True 
+ENABLE_ML_SPAM_CHECK = False 
 # ================= Global Variables for ML Model/User Data =================
 ML_MODEL = None
 TFIDF_VECTORIZER = None
