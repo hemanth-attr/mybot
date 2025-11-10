@@ -1,4 +1,3 @@
-import asyncio
 import os
 import logging
 import asyncpg
@@ -54,6 +53,18 @@ async def setup_database():
                     PRIMARY KEY (chat_id, user_id)
                 )
             """)
+            
+            # --- NEW TABLE ---
+            # Table for persistent user activity (tracks new users)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_activity (
+                    chat_id BIGINT,
+                    user_id BIGINT,
+                    initial_count INTEGER DEFAULT 0,
+                    PRIMARY KEY (chat_id, user_id)
+                )
+            """)
+            
             logging.info("Database tables verified/created.")
         except Exception as e:
             logging.error(f"Error setting up database tables: {e}")
@@ -100,11 +111,12 @@ async def set_chat_setting(chat_id: int, setting_name: str, value: bool):
     async with pool.acquire() as conn:
         await conn.execute(query, chat_id, value)
         
+# --- WARNING FUNCTIONS ---
+
 async def add_warning_async(chat_id: int, user_id: int) -> tuple[int, datetime]:
     """
     Adds a warning to a user, or updates their existing warning.
     This entire function is a single, safe database transaction.
-    It completely replaces your old add_warning_async function.
     """
     pool = await get_pool()
     if not pool:
@@ -113,11 +125,6 @@ async def add_warning_async(chat_id: int, user_id: int) -> tuple[int, datetime]:
     new_expiry = datetime.now() + timedelta(days=1)
     
     async with pool.acquire() as conn:
-        # This query does everything in one step:
-        # 1. Tries to INSERT a new warning (1 count).
-        # 2. If the (chat_id, user_id) already exists, it hits a CONFLICT.
-        # 3. ON CONFLICT, it runs the UPDATE instead, incrementing the count.
-        # 4. It returns the new count and expiry time.
         row = await conn.fetchrow(
             """
             INSERT INTO warnings (chat_id, user_id, count, expiry)
@@ -133,7 +140,7 @@ async def add_warning_async(chat_id: int, user_id: int) -> tuple[int, datetime]:
         return row['count'], row['expiry']
 
 async def clear_warning_async(chat_id: int, user_id: int):
-    """Clears a user's warnings. Replaces your old function."""
+    """Clears a user's warnings."""
     pool = await get_pool()
     if not pool:
         return
@@ -145,7 +152,7 @@ async def clear_warning_async(chat_id: int, user_id: int):
         )
 
 async def clean_expired_warnings_async():
-    """Cleans up warnings. Replaces your old function."""
+    """Cleans up expired warnings from the database."""
     pool = await get_pool()
     if not pool:
         return
@@ -160,3 +167,42 @@ async def clean_expired_warnings_async():
         count = int(result.split(' ')[-1])
         if count > 0:
             logging.info(f"Cleaned {count} expired warnings from database.")
+            
+# --- NEW USER ACTIVITY FUNCTIONS ---
+
+async def get_user_initial_count(chat_id: int, user_id: int) -> int:
+    """Gets the persistent initial message count for a user."""
+    pool = await get_pool()
+    if not pool:
+        return 0
+
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT initial_count FROM user_activity WHERE chat_id = $1 AND user_id = $2",
+            chat_id, user_id
+        )
+        return count if count is not None else 0
+
+async def increment_user_initial_count(chat_id: int, user_id: int, max_count: int):
+    """
+    Increments the user's persistent initial message count, up to the max.
+    This is called on every message from a user until they reach the max.
+    """
+    pool = await get_pool()
+    if not pool:
+        return
+
+    async with pool.acquire() as conn:
+        # This query will insert a new user with count 1, or
+        # increment an existing user's count, but only if their
+        # current count is less than the max_count.
+        await conn.execute(
+            """
+            INSERT INTO user_activity (chat_id, user_id, initial_count)
+            VALUES ($1, $2, 1)
+            ON CONFLICT (chat_id, user_id) DO UPDATE
+            SET initial_count = LEAST(user_activity.initial_count + 1, $3)
+            WHERE user_activity.initial_count < $3
+            """,
+            chat_id, user_id, max_count
+        )
