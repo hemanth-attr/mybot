@@ -12,7 +12,8 @@ from flask import Flask, request
 from unidecode import unidecode
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ChatPermissions, Bot, MessageEntity, User, ChatMember
+    ChatPermissions, Bot, MessageEntity, User, ChatMember,
+    MessageOriginChannel  # <-- FIX 1: Added necessary import
 )
 from telegram.constants import ParseMode, ChatType, MessageEntityType
 from telegram.ext import (
@@ -362,24 +363,12 @@ async def get_target_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif context.args and context.args[0].isdigit():
         user_id = int(context.args[0])
         
-    # ### FIX: Correctly handle mentions (@username) by parsing message entities
+    # ### FIX 3: Removed the non-functional `MENTION` check. 
+    # Only `TEXT_MENTION` is reliably parsable here.
     # 3. Check for a mention entity in the message
     elif context.args and context.args[0].startswith('@') and message.entities:
         for entity in message.entities:
-            if entity.type == MessageEntityType.MENTION:
-                # In a command like /warn @username, the username is the entity
-                username_in_text = message.text[entity.offset:(entity.offset + entity.length)]
-                if username_in_text == context.args[0]:
-                    try:
-                        # We need to find the user associated with this username.
-                        # This requires fetching the user object from the chat.
-                        # A direct lookup by username isn't available, so this approach is complex.
-                        # The TEXT_MENTION is more reliable. We will prioritize that.
-                        pass # Placeholder for a more complex lookup if needed
-                    except Exception as e:
-                        logger.warning(f"Could not resolve MENTION entity: {e}")
-
-            elif entity.type == MessageEntityType.TEXT_MENTION:
+            if entity.type == MessageEntityType.TEXT_MENTION:
                 # A text mention is a username linked to a user who doesn't have a public @username
                 # or when a user is mentioned by their name. The user object is directly in the entity.
                 if entity.user:
@@ -990,9 +979,6 @@ async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TY
             pass
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ### PERFORMANCE: No need to load all data on every message.
-    # It will be loaded when a check is actually needed, e.g., during a warning.
-    
     if not update.message or not (update.message.text or update.message.caption):
         return
 
@@ -1007,21 +993,35 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id in SYSTEM_BOT_IDS:
         return
         
-    try:
-        chat_admins = await chat.get_administrators()
-        admin_ids = [admin.user.id for admin in chat_admins]
-    except TelegramError:
-        admin_ids = []
+    # ### FIX 2: Admin Caching Logic to prevent API rate-limiting ###
+    # This replaces the original get_administrators() call
+    admin_ids = context.chat_data.get("admin_ids")
+    cache_expiry = context.chat_data.get("admin_cache_expiry", 0)
+    now = time.time()
+
+    if not admin_ids or now > cache_expiry:
+        try:
+            logger.info(f"Refreshing admin cache for chat {chat.id}...")
+            chat_admins = await chat.get_administrators()
+            admin_ids = [admin.user.id for admin in chat_admins]
+            
+            # Store in context
+            context.chat_data["admin_ids"] = admin_ids
+            context.chat_data["admin_cache_expiry"] = now + 3600  # Cache for 1 hour
+            
+        except TelegramError as e:
+            logger.error(f"Failed to refresh admin cache for {chat.id}: {e}")
+            admin_ids = admin_ids or [] # Use old list if update fails, or empty list
+    # --- End Admin Caching ---
 
     if user.id in admin_ids:
         return
-    if update.message.forward_origin and update.message.forward_origin.sender_chat:
-        sender_chat = update.message.forward_origin.sender_chat
-        
-        # Check if the original sender chat type is a CHANNEL
-        if sender_chat.type == ChatType.CHANNEL:
-            await handle_spam("forwarded a spam messages.")
-            return
+    
+    # ### FIX 1: Corrected check for channel forwards ###
+    if update.message.forward_origin and isinstance(update.message.forward_origin, MessageOriginChannel):
+        # This message was forwarded from a channel
+        await handle_spam("forwarded a message from a channel")
+        return
     
     update_user_activity(user.id) 
 
