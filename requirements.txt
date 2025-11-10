@@ -5,3 +5,4 @@ unidecode
 joblib
 scikit-learn==1.6.1 # Used for ML_MODEL and TFIDF_VECTORIZER
 asgiref
+asyncpg
