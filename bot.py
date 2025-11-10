@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 from typing import cast, Any, Optional
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
+from asgiref.wsgi import WsgiToAsgi
 
 # ================= Configuration =================
 TOKEN = os.getenv("TOKEN")
@@ -1197,8 +1198,9 @@ async def setup_webhook():
 async def serve_app():
     config = Config()
     config.bind = [f"0.0.0.0:{PORT}"]
+    asgi_app = WsgiToAsgi(app)
     
-    await serve(app, config)
+    await serve(asgi_app, config)
     
 async def run_bot_server():
     """Main function to setup bot and start the web server."""
