@@ -4,3 +4,4 @@ python-telegram-bot[job-queue] # Critical fix for the 'run_repeating' error
 unidecode
 joblib
 scikit-learn==1.6.1 # Used for ML_MODEL and TFIDF_VECTORIZER
+asgiref
