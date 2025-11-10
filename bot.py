@@ -1015,7 +1015,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user.id in admin_ids:
         return
+    if update.message.forward_origin and update.message.forward_origin.sender_chat:
+        sender_chat = update.message.forward_origin.sender_chat
         
+        # Check if the original sender chat type is a CHANNEL
+        if sender_chat.type == ChatType.CHANNEL:
+            await handle_spam("forwarded a spam messages.")
+            return
+    
     update_user_activity(user.id) 
 
     async def handle_spam(reason_text: str):
