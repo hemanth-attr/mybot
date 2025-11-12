@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 from typing import cast, Any, Optional
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
-from asg_wsgiref.wsgi import WsgiToAsgi
+from asgiref.wsgi import WsgiToAsgi
 
 # Import our database module
 import database as db
