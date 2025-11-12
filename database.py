@@ -16,7 +16,9 @@ async def get_pool():
     global db_pool
     if db_pool is None:
         try:
-            db_pool = await asyncpg.create_pool(DATABASE_URL)
+            # --- IMPROVEMENT: Added timeout for Neon reliability ---
+            # This helps survive "cold starts"
+            db_pool = await asyncpg.create_pool(DATABASE_URL, command_timeout=10)
             logging.info("Database connection pool created successfully.")
         except Exception as e:
             logging.error(f"Failed to create database pool: {e}")
@@ -39,7 +41,8 @@ async def setup_database():
                 CREATE TABLE IF NOT EXISTS chat_settings (
                     chat_id BIGINT PRIMARY KEY,
                     strict_mode BOOLEAN DEFAULT FALSE,
-                    ml_mode BOOLEAN DEFAULT FALSE
+                    ml_mode BOOLEAN DEFAULT FALSE,
+                    auto_reaction BOOLEAN DEFAULT FALSE
                 )
             """)
             
@@ -54,7 +57,6 @@ async def setup_database():
                 )
             """)
             
-            # --- NEW TABLE ---
             # Table for persistent user activity (tracks new users)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_activity (
@@ -66,6 +68,17 @@ async def setup_database():
             """)
             
             logging.info("Database tables verified/created.")
+            
+            # --- IMPROVEMENT: Proactively add the new column if it's missing ---
+            try:
+                await conn.execute(
+                    "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS auto_reaction BOOLEAN DEFAULT FALSE"
+                )
+                logging.info("Verified 'auto_reaction' column exists in chat_settings.")
+            except Exception as e:
+                logging.warning(f"Could not alter table to add auto_reaction: {e}")
+            # --- END IMPROVEMENT ---
+            
         except Exception as e:
             logging.error(f"Error setting up database tables: {e}")
 
@@ -73,35 +86,49 @@ async def get_chat_settings(chat_id: int) -> dict:
     """Fetches the settings for a specific chat."""
     pool = await get_pool()
     if not pool:
-        return {"strict_mode": False, "ml_mode": False} # Default on error
+        return {"strict_mode": False, "ml_mode": False, "auto_reaction": False} 
 
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT strict_mode, ml_mode FROM chat_settings WHERE chat_id = $1",
-            chat_id
-        )
+        # --- IMPROVEMENT: Handle case where auto_reaction column doesn't exist yet ---
+        try:
+            row = await conn.fetchrow(
+                "SELECT strict_mode, ml_mode, auto_reaction FROM chat_settings WHERE chat_id = $1",
+                chat_id
+            )
+        except asyncpg.exceptions.UndefinedColumnError:
+            logging.warning("auto_reaction column missing, falling back.")
+            row = await conn.fetchrow(
+                 "SELECT strict_mode, ml_mode, FALSE as auto_reaction FROM chat_settings WHERE chat_id = $1",
+                chat_id
+            )
+        # --- END IMPROVEMENT ---
+
         if row:
-            return {"strict_mode": row['strict_mode'], "ml_mode": row['ml_mode']}
+            return {"strict_mode": row['strict_mode'], "ml_mode": row['ml_mode'], "auto_reaction": row['auto_reaction']}
         
         # If no settings exist, create them
-        await conn.execute(
-            """
-            INSERT INTO chat_settings (chat_id, strict_mode, ml_mode)
-            VALUES ($1, FALSE, FALSE)
-            ON CONFLICT (chat_id) DO NOTHING
-            """,
-            chat_id
-        )
-        return {"strict_mode": False, "ml_mode": False}
+        try:
+            await conn.execute(
+                """
+                INSERT INTO chat_settings (chat_id, strict_mode, ml_mode, auto_reaction)
+                VALUES ($1, FALSE, FALSE, FALSE)
+                ON CONFLICT (chat_id) DO NOTHING
+                """,
+                chat_id
+            )
+        except Exception:
+             pass # Ignore errors if table is in a weird state, will use default
+            
+        return {"strict_mode": False, "ml_mode": False, "auto_reaction": False}
 
 async def set_chat_setting(chat_id: int, setting_name: str, value: bool):
-    """Updates a specific setting (strict_mode or ml_mode) for a chat."""
+    """Updates a specific setting (strict_mode, ml_mode, or auto_reaction) for a chat."""
     pool = await get_pool()
-    if not pool or setting_name not in ('strict_mode', 'ml_mode'):
+    
+    if not pool or setting_name not in ('strict_mode', 'ml_mode', 'auto_reaction'):
+        logging.warning(f"Invalid setting name '{setting_name}' passed to set_chat_setting.")
         return
 
-    # Using f-string here is SAFE because the variable is checked against a
-    # hardcoded list ('strict_mode', 'ml_mode') and is not user input.
     query = f"""
         INSERT INTO chat_settings (chat_id, {setting_name})
         VALUES ($1, $2)
@@ -114,16 +141,10 @@ async def set_chat_setting(chat_id: int, setting_name: str, value: bool):
 # --- WARNING FUNCTIONS ---
 
 async def add_warning_async(chat_id: int, user_id: int) -> tuple[int, datetime]:
-    """
-    Adds a warning to a user, or updates their existing warning.
-    This entire function is a single, safe database transaction.
-    """
     pool = await get_pool()
     if not pool:
         raise Exception("Database pool is not available.")
-
     new_expiry = datetime.now() + timedelta(days=1)
-    
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -140,11 +161,9 @@ async def add_warning_async(chat_id: int, user_id: int) -> tuple[int, datetime]:
         return row['count'], row['expiry']
 
 async def clear_warning_async(chat_id: int, user_id: int):
-    """Clears a user's warnings."""
     pool = await get_pool()
     if not pool:
         return
-
     async with pool.acquire() as conn:
         await conn.execute(
             "DELETE FROM warnings WHERE chat_id = $1 AND user_id = $2",
@@ -152,18 +171,15 @@ async def clear_warning_async(chat_id: int, user_id: int):
         )
 
 async def clean_expired_warnings_async():
-    """Cleans up expired warnings from the database."""
     pool = await get_pool()
     if not pool:
         return
-
     async with pool.acquire() as conn:
         now = datetime.now()
         result = await conn.execute(
             "DELETE FROM warnings WHERE expiry < $1",
             now
         )
-        # result is a string like 'DELETE 5'
         count = int(result.split(' ')[-1])
         if count > 0:
             logging.info(f"Cleaned {count} expired warnings from database.")
@@ -171,11 +187,9 @@ async def clean_expired_warnings_async():
 # --- NEW USER ACTIVITY FUNCTIONS ---
 
 async def get_user_initial_count(chat_id: int, user_id: int) -> int:
-    """Gets the persistent initial message count for a user."""
     pool = await get_pool()
     if not pool:
         return 0
-
     async with pool.acquire() as conn:
         count = await conn.fetchval(
             "SELECT initial_count FROM user_activity WHERE chat_id = $1 AND user_id = $2",
@@ -184,18 +198,10 @@ async def get_user_initial_count(chat_id: int, user_id: int) -> int:
         return count if count is not None else 0
 
 async def increment_user_initial_count(chat_id: int, user_id: int, max_count: int):
-    """
-    Increments the user's persistent initial message count, up to the max.
-    This is called on every message from a user until they reach the max.
-    """
     pool = await get_pool()
     if not pool:
         return
-
     async with pool.acquire() as conn:
-        # This query will insert a new user with count 1, or
-        # increment an existing user's count, but only if their
-        # current count is less than the max_count.
         await conn.execute(
             """
             INSERT INTO user_activity (chat_id, user_id, initial_count)
