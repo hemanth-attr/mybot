@@ -12,7 +12,7 @@ from unidecode import unidecode
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ChatPermissions, Bot, Message, MessageEntity, User, ChatMember,
-    MessageOriginChannel
+    MessageOriginChannel, ReactionTypeEmoji
 )
 from telegram.constants import ParseMode, ChatType, MessageEntityType
 from telegram.ext import (
@@ -54,7 +54,6 @@ ALLOWED_DOMAINS = ["plus-ui.blogspot.com", "plus-ul.blogspot.com", "fineshopdesi
 
 # === REACTION CONFIG ===
 REACTION_LIST = ["🔥", "👍", "🤔", "😎", "🆒", "🫡", "❤️", "💯", "👀", "☃️", "🌚", "🎄", "⚡️", "🙏", "💘", "🏆", "👌", "👨‍💻", "🤗"]
-
 # === SPAM DETECTION CONFIG ===
 SPAM_KEYWORDS = {
     "lottery", "deal", "coupon", "promo", "discount", "referral", "link in bio",
