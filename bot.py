@@ -11,7 +11,7 @@ from flask import Flask, request
 from unidecode import unidecode
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ChatPermissions, Bot, MessageEntity, User, ChatMember,
+    ChatPermissions, Bot, Message, MessageEntity, User, ChatMember,
     MessageOriginChannel
 )
 from telegram.constants import ParseMode, ChatType, MessageEntityType
@@ -218,7 +218,7 @@ async def is_spam(message_text: str, message_entities: list[MessageEntity] | Non
 
 # ================= Bot Helper Functions =================
 
-async def apply_auto_reaction(message: Update.message | Update.channel_post, bot: Bot):
+async def apply_auto_reaction(message: Message, bot: Bot):
     """Applies a random reaction from the REACTION_LIST to a message."""
     if not message:
         return
