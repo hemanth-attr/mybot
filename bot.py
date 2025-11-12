@@ -41,7 +41,7 @@ FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
 
-ALLOWED_GROUP_ID = -1002810504524
+ALLOWED_GROUP_ID = -1002810504524 # Note: This is now ONLY used for the mute logic
 SYSTEM_BOT_IDS = [136817688, 1087968824]
 USERNAME_REQUIRED = False
 
@@ -138,7 +138,10 @@ async def rule_check(message_text: str, message_entities: list[MessageEntity] | 
 
     # Rule 2: Block all other URLs if BLOCK_ALL_URLS is enabled (or for new users)
     if BLOCK_ALL_URLS or is_critical_message:
-        url_finder = re.compile(r"((?:https?://|www\.|t\.me/)\S+)", re.I)
+        # --- IMPROVED REGEX ---
+        url_finder = re.compile(r'((?:https?://|www\.|t\.me/)\S+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\S*)', re.I)
+        # --- END IMPROVEMENT ---
+        
         found_urls = url_finder.findall(text_lower)
         allowed_domains_lower = [d.lower() for d in ALLOWED_DOMAINS]
 
@@ -153,7 +156,13 @@ async def rule_check(message_text: str, message_entities: list[MessageEntity] | 
                 parsed_url = urlparse(temp_url)
                 domain = parsed_url.netloc.split(':')[0].lower().replace("www.", "")
                 if not domain and parsed_url.path:
+                    # Fallback for simple 'domain.com'
                     domain = parsed_url.path.strip('/').split('/')[0].lower()
+                
+                # Double-check domain extracted from path
+                if not domain and '.' in temp_url:
+                     domain = url.split('/')[0].lower().replace("www.", "")
+
                 if domain and domain not in allowed_domains_lower:
                     return True, "has sent a Link without authorization"
             except Exception:
@@ -224,19 +233,15 @@ async def apply_auto_reaction(message: Message, bot: Bot):
     try:
         reaction = random.choice(REACTION_LIST)
         
-        # --- THIS IS THE FIX ---
-        # We explicitly tell Telegram this is a standard emoji
         await bot.set_message_reaction(
             chat_id=message.chat_id,
             message_id=message.message_id,
-            reaction=[ReactionTypeEmoji(emoji=reaction)]  # <-- THIS LINE IS NOW CORRECT
+            reaction=[ReactionTypeEmoji(emoji=reaction)]
         )
-        # --- END FIX ---
         
     except TelegramError as e:
         logger.warning(f"Failed to apply auto-reaction in {message.chat_id}: {e}")
 
-# --- IMPROVEMENT: Replaced is_admin with cached version ---
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     Checks if the user sending the message is an admin, using a 1-hour cache.
@@ -276,7 +281,6 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     
     await update.effective_message.reply_text("You must be an administrator to use this command.")
     return False
-# --- END IMPROVEMENT ---
 
 async def get_target_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[tuple[int, str]]:
     """Identifies the target user ID and their display name from a command."""
@@ -567,7 +571,6 @@ async def set_reaction_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = "Invalid argument. Use `on` or `off`."
     await update.effective_message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
-# --- IMPROVEMENT: Added new command handler ---
 async def check_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Checks if the bot has all the necessary permissions to function."""
     if not update.effective_chat or not context.bot:
@@ -602,7 +605,6 @@ async def check_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError as e:
         logger.error(f"Error checking permissions in {chat.id}: {e}")
         await update.effective_message.reply_text(f"Failed to check permissions: {e}")
-# --- END IMPROVEMENT ---
 
 # ================= Flask App & Bot Setup =================
 app = Flask(__name__)
@@ -658,7 +660,7 @@ async def periodic_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
     # 1. Clean expired warnings from DB
     await db.clean_expired_warnings_async()
 
-    # --- 2. IMPROVEMENT: Clean in-memory flood cache ---
+    # 2. Clean in-memory flood cache
     now = time.time()
     one_hour_ago = now - 3600  # 1 hour
     cleaned_users = 0
@@ -676,7 +678,6 @@ async def periodic_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
             
     if cleaned_users > 0:
         logger.info(f"Cleaned {cleaned_users} inactive users from in-memory flood cache.")
-    # --- END IMPROVEMENT ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Starts the file-gating process."""
@@ -781,15 +782,32 @@ async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TY
         try: await update.message.delete()
         except TelegramError: pass
 
+
+# --- 
+# --- MAJOR LOGIC REWORK IN THIS HANDLER ---
+# ---
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not (update.message.text or update.message.caption):
+    if not update.message:
         return
+        
     user = update.message.from_user
     chat = update.effective_chat
+    
+    # --- Check for message/caption early ---
     text = update.message.text or update.message.caption or ""
     entities = update.message.entities or update.message.caption_entities
 
     if not user or not chat: return
+    
+    # --- FIX 1: Handle channel forwards FIRST ---
+    if update.message.forward_origin and isinstance(update.message.forward_origin, MessageOriginChannel):
+        # This is a post from a linked channel
+        settings = await db.get_chat_settings(chat.id) # Get group's settings
+        if settings.get("auto_reaction", False):
+            await apply_auto_reaction(update.message, context.bot)
+        return # Don't spam check channel posts
+    
+    # --- Now check system bots ---
     if user.id in SYSTEM_BOT_IDS: return
         
     # Admin Caching Logic
@@ -808,26 +826,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Failed to refresh admin cache for {chat.id}: {e}")
             admin_ids = admin_ids or []
     
-    # --- IMPROVEMENT: Combined Admin & Reaction Logic ---
+    # --- Check for Admins ---
     if user.id in admin_ids:
         settings = await db.get_chat_settings(chat.id)
-        if settings.get("auto_reaction", False):
+        # React to admin text or photos
+        if settings.get("auto_reaction", False) and (text or update.message.photo): 
             await apply_auto_reaction(update.message, context.bot)
         return # Admins are never spam-checked
-    # --- END IMPROVEMENT ---
     
-    # --- IMPROVEMENT: Corrected Channel Reaction & Spam Logic ---
-    if update.message.forward_origin and isinstance(update.message.forward_origin, MessageOriginChannel):
-        # This is a post from a linked channel
-        settings = await db.get_chat_settings(chat.id) # Get group's settings
-        if settings.get("auto_reaction", False):
-            await apply_auto_reaction(update.message, context.bot)
-        
-        # Now check if we should block it
-        await handle_spam("forwarded a message from a channel")
-        return
-    # --- END IMPROVEMENT ---
-    
+    # --- FIX 4: Flood check for ALL messages (including stickers/media) ---
     await update_user_activity(chat.id, user.id) 
 
     async def handle_spam(reason_text: str):
@@ -855,15 +862,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{user.id}")]]
             
-            if chat.id == ALLOWED_GROUP_ID:
-                until_date = datetime.now() + timedelta(days=1)
-                try:
-                    await context.bot.restrict_chat_member(
-                        chat_id=chat.id, user_id=user.id,
-                        permissions=ChatPermissions(can_send_messages=False),
-                        until_date=until_date
-                    )
-                except TelegramError as e: logger.error(f"Failed to mute user {user.id}: {e}")
+            # --- FIX 2: Mute logic moved out of if-condition ---
+            # This will now apply to ANY group, not just ALLOWED_GROUP_ID
+            until_date = datetime.now() + timedelta(days=1)
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=chat.id, user_id=user.id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=until_date
+                )
+            except TelegramError as e: logger.error(f"Failed to mute user {user.id}: {e}")
+            # --- END FIX 2 ---
         
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         try:
@@ -873,18 +882,18 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except TelegramError as e: logger.error(f"Failed to send warning message: {e}")
             
-    if entities:
-        for entity in entities:
-            if entity.type in [MessageEntityType.URL, MessageEntityType.TEXT_LINK]:
-                link_url = ""
-                if entity.type == MessageEntityType.URL:
-                    link_url = text[entity.offset:entity.offset + entity.length].lower()
-                elif entity.type == MessageEntityType.TEXT_LINK and entity.url:
-                    link_url = entity.url.lower()
-                if "t.me/" in link_url or "telegram.me/" in link_url:
-                    await handle_spam("Promotion not allowed (Telegram Link Entity)!")
-                    return
+    # --- FIX 4: Check if this is a text/caption message before text-based spam checks ---
+    if not text:
+        # It's a sticker, photo (no caption), etc.
+        # Check for flood spam ONLY
+        if is_flood_spam(user.id):
+            await handle_spam("is flooding the chat (media/stickers)")
+        return # No text, so no more checks needed
 
+    # --- FIX 5: Removed redundant t.me entity check ---
+    # The `is_spam` call below handles this via `rule_check`
+
+    # This part now only runs if `text` is present
     is_spam_message, reason = await is_spam(text, entities, user.id, chat.id)
     if is_spam_message:
         await handle_spam(reason or "sent a spam message")
@@ -948,15 +957,17 @@ async def setup_bot_application():
     application.add_handler(CommandHandler("set_strict_mode", set_strict_mode, filters=filters.ChatType.GROUPS)) 
     application.add_handler(CommandHandler("set_ml_check", set_ml_check, filters=filters.ChatType.GROUPS)) 
     application.add_handler(CommandHandler("set_reaction_mode", set_reaction_mode, filters=filters.ChatType.GROUPS)) 
-    
-    # --- ADDED HANDLER ---
     application.add_handler(CommandHandler("check_permissions", check_permissions, filters=filters.ChatType.GROUPS))
 
     application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*|unban:.*)$")) 
     
-    # --- REMOVED ChannelPostHandler ---
+    # --- FIX 4: Broaden filter to catch media/sticker floods ---
+    # We now catch all group messages that aren't commands
+    application.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & (filters.ALL & ~filters.COMMAND), 
+        message_handler
+    ))
     
-    application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, message_handler))
     application.add_handler(MessageHandler(
         filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
         handle_status_updates
@@ -1016,5 +1027,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-}
