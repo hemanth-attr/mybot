@@ -223,11 +223,16 @@ async def apply_auto_reaction(message: Message, bot: Bot):
         return
     try:
         reaction = random.choice(REACTION_LIST)
+        
+        # --- THIS IS THE FIX ---
+        # We explicitly tell Telegram this is a standard emoji
         await bot.set_message_reaction(
             chat_id=message.chat_id,
             message_id=message.message_id,
-            reaction=[reaction]
+            reaction=[ReactionTypeEmoji(emoji=reaction)]  # <-- THIS LINE IS NOW CORRECT
         )
+        # --- END FIX ---
+        
     except TelegramError as e:
         logger.warning(f"Failed to apply auto-reaction in {message.chat_id}: {e}")
 
@@ -337,7 +342,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/set_strict_mode [on/off]`: Toggle strict mode for new users.\n"
         "• `/set_ml_check [on/off]`: Toggle ML spam detection.\n"
         "• `/set_reaction_mode [on/off]`: Toggle auto-reactions.\n"
-        "• `/check_permissions`: Check bot's admin rights in this chat." # <-- ADDED
+        "• `/check_permissions`: Check bot's admin rights in this chat."
     )
     await update.effective_message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -958,7 +963,7 @@ async def setup_bot_application():
     ))
     
     application.job_queue.run_repeating(periodic_cleanup_job, interval=3600, first=5)
-    logger.info("Scheduled periodic cleanup job.")
+    logger.info("Scheduled periodic warning cleanup job.")
     
     await application.initialize()
     await application.start()
@@ -1011,3 +1016,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+}
