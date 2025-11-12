@@ -53,7 +53,7 @@ BLOCK_ALL_URLS = False
 ALLOWED_DOMAINS = ["plus-ui.blogspot.com", "plus-ul.blogspot.com", "fineshopdesign.com"]
 
 # === REACTION CONFIG ===
-REACTION_LIST = ["🔥", "❤️‍🔥", "👍", "🤔", "😎", "🆒", "🫡", "❤️", "💯", "👀", "☃️", "🌚", "🎄", "⚡️", "🙏", "💘", "🏆", "👌", "👨‍💻", "🤗"]
+REACTION_LIST = ["🔥", "👍", "🤔", "😎", "🆒", "🫡", "❤️", "💯", "👀", "☃️", "🌚", "🎄", "⚡️", "🙏", "💘", "🏆", "👌", "👨‍💻", "🤗"]
 
 # === SPAM DETECTION CONFIG ===
 SPAM_KEYWORDS = {
