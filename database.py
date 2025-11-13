@@ -1,7 +1,8 @@
 import os
 import logging
 import asyncpg
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone  # <-- FIX 2: Imported timezone
+from asyncio import Lock  # <-- FIX 3: Imported Lock
 
 # Get the database URL from the environment variable we set on Render
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -10,6 +11,7 @@ if not DATABASE_URL:
 
 # A global variable to hold the connection pool
 db_pool = None
+_db_lock = Lock()  # <-- FIX 3: Global lock for setup
 
 async def get_pool():
     """Initializes and returns the database connection pool."""
@@ -18,7 +20,11 @@ async def get_pool():
         try:
             # --- IMPROVEMENT: Added timeout for Neon reliability ---
             # This helps survive "cold starts"
-            db_pool = await asyncpg.create_pool(DATABASE_URL, command_timeout=10)
+            db_pool = await asyncpg.create_pool(
+                DATABASE_URL, 
+                command_timeout=10,
+                max_inactive_connection_lifetime=300  # <-- FIX 5: Added lifetime
+            )
             logging.info("Database connection pool created successfully.")
         except Exception as e:
             logging.error(f"Failed to create database pool: {e}")
@@ -29,58 +35,59 @@ async def setup_database():
     """
     Runs on bot startup to create all necessary tables.
     """
-    pool = await get_pool()
-    if not pool:
-        logging.error("Cannot set up database, pool is not available.")
-        return
+    async with _db_lock:  # <-- FIX 3: Use lock to prevent race condition
+        pool = await get_pool()
+        if not pool:
+            logging.error("Cannot set up database, pool is not available.")
+            return
 
-    async with pool.acquire() as conn:
-        try:
-            # Table for chat-specific settings
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS chat_settings (
-                    chat_id BIGINT PRIMARY KEY,
-                    strict_mode BOOLEAN DEFAULT FALSE,
-                    ml_mode BOOLEAN DEFAULT FALSE,
-                    auto_reaction BOOLEAN DEFAULT FALSE
-                )
-            """)
-            
-            # Table for user warnings
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS warnings (
-                    chat_id BIGINT,
-                    user_id BIGINT,
-                    count INTEGER DEFAULT 0,
-                    expiry TIMESTAMPTZ,
-                    PRIMARY KEY (chat_id, user_id)
-                )
-            """)
-            
-            # Table for persistent user activity (tracks new users)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_activity (
-                    chat_id BIGINT,
-                    user_id BIGINT,
-                    initial_count INTEGER DEFAULT 0,
-                    PRIMARY KEY (chat_id, user_id)
-                )
-            """)
-            
-            logging.info("Database tables verified/created.")
-            
-            # --- IMPROVEMENT: Proactively add the new column if it's missing ---
+        async with pool.acquire() as conn:
             try:
-                await conn.execute(
-                    "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS auto_reaction BOOLEAN DEFAULT FALSE"
-                )
-                logging.info("Verified 'auto_reaction' column exists in chat_settings.")
+                # Table for chat-specific settings
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS chat_settings (
+                        chat_id BIGINT PRIMARY KEY,
+                        strict_mode BOOLEAN DEFAULT FALSE,
+                        ml_mode BOOLEAN DEFAULT FALSE,
+                        auto_reaction BOOLEAN DEFAULT FALSE
+                    )
+                """)
+                
+                # Table for user warnings
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS warnings (
+                        chat_id BIGINT,
+                        user_id BIGINT,
+                        count INTEGER DEFAULT 0,
+                        expiry TIMESTAMPTZ,
+                        PRIMARY KEY (chat_id, user_id)
+                    )
+                """)
+                
+                # Table for persistent user activity (tracks new users)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS user_activity (
+                        chat_id BIGINT,
+                        user_id BIGINT,
+                        initial_count INTEGER DEFAULT 0,
+                        PRIMARY KEY (chat_id, user_id)
+                    )
+                """)
+                
+                logging.info("Database tables verified/created.")
+                
+                # --- IMPROVEMENT: Proactively add the new column if it's missing ---
+                try:
+                    await conn.execute(
+                        "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS auto_reaction BOOLEAN DEFAULT FALSE"
+                    )
+                    logging.info("Verified 'auto_reaction' column exists in chat_settings.")
+                except Exception as e:
+                    logging.warning(f"Could not alter table to add auto_reaction: {e}")
+                # --- END IMPROVEMENT ---
+                
             except Exception as e:
-                logging.warning(f"Could not alter table to add auto_reaction: {e}")
-            # --- END IMPROVEMENT ---
-            
-        except Exception as e:
-            logging.error(f"Error setting up database tables: {e}")
+                logging.error(f"Error setting up database tables: {e}")
 
 async def get_chat_settings(chat_id: int) -> dict:
     """Fetches the settings for a specific chat."""
@@ -116,8 +123,9 @@ async def get_chat_settings(chat_id: int) -> dict:
                 """,
                 chat_id
             )
-        except Exception:
-             pass # Ignore errors if table is in a weird state, will use default
+        except Exception as e:
+             # <-- FIX 4: Replaced pass with logging
+             logging.warning(f"Failed to insert default chat_settings for {chat_id}: {e}")
             
         return {"strict_mode": False, "ml_mode": False, "auto_reaction": False}
 
@@ -144,7 +152,10 @@ async def add_warning_async(chat_id: int, user_id: int) -> tuple[int, datetime]:
     pool = await get_pool()
     if not pool:
         raise Exception("Database pool is not available.")
-    new_expiry = datetime.now() + timedelta(days=1)
+    
+    # <-- FIX 2: Use timezone.utc
+    new_expiry = datetime.now(timezone.utc) + timedelta(days=1)
+    
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -175,7 +186,9 @@ async def clean_expired_warnings_async():
     if not pool:
         return
     async with pool.acquire() as conn:
-        now = datetime.now()
+        
+        now = datetime.now(timezone.utc)  # <-- FIX 2: Use timezone.utc
+        
         result = await conn.execute(
             "DELETE FROM warnings WHERE expiry < $1",
             now
