@@ -62,7 +62,7 @@ SPAM_KEYWORDS = {
 SPAM_EMOJIS = {"😀", "😂", "🔥", "💯", "😍", "❤️", "🥳", "🎉", "💰", "💵", "🤑", "🤩"}
 FORMATTING_ENTITY_TYPES = {
     MessageEntityType.BOLD, MessageEntityType.ITALIC, MessageEntityType.CODE,
-    MessageEntityType.UNDERLINE, MessageEntityType.STRIKETHUGH, MessageEntityType.SPOILER,
+    MessageEntityType.UNDERLINE, MessageEntityType.STRIKETHROUGH, MessageEntityType.SPOILER,
     MessageEntityType.PRE, MessageEntityType.BLOCKQUOTE
 }
 MAX_FORMATTING_ENTITIES = 5
