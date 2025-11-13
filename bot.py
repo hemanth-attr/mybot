@@ -1000,6 +1000,10 @@ async def run_bot_server():
     finally:
         logger.info("Shutting down application...")
         await application.stop()
+        # --- ADD THIS BLOCK (Note 1) ---
+        if db.db_pool:
+            logger.info("Closing database pool...")
+            await db.db_pool.close()
         logger.info("Application stopped. Bot server shut down gracefully.")
 
 def main():
