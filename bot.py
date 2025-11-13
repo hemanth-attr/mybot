@@ -18,7 +18,6 @@ from telegram.constants import ParseMode, ChatType, MessageEntityType
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters, Application
-    # ChannelPostHandler is no longer needed
 )
 from telegram.error import TelegramError
 from urllib.parse import urlparse
@@ -41,15 +40,11 @@ FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
 
-# --- This is no longer used for logic, only as a reference ---
-# ALLOWED_GROUP_ID = -1002810504524 
 SYSTEM_BOT_IDS = [136817688, 1087968824]
 USERNAME_REQUIRED = False
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 WEBHOOK_PATH = "/botupdates"
-
-# --- NEW: Recommended for webhook security ---
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "a_very_strong_random_string_12345_replace_me")
 
 # === URL Blocking Control ===
@@ -67,7 +62,7 @@ SPAM_KEYWORDS = {
 SPAM_EMOJIS = {"😀", "😂", "🔥", "💯", "😍", "❤️", "🥳", "🎉", "💰", "💵", "🤑", "🤩"}
 FORMATTING_ENTITY_TYPES = {
     MessageEntityType.BOLD, MessageEntityType.ITALIC, MessageEntityType.CODE,
-    MessageEntityType.UNDERLINE, MessageEntityType.STRIKETHROUGH, MessageEntityType.SPOILER,
+    MessageEntityType.UNDERLINE, MessageEntityType.STRIKETHUGH, MessageEntityType.SPOILER,
     MessageEntityType.PRE, MessageEntityType.BLOCKQUOTE
 }
 MAX_FORMATTING_ENTITIES = 5
@@ -78,8 +73,7 @@ FLOOD_MESSAGE_COUNT = 3
 # ================= Global Variables =================
 ML_MODEL = None
 TFIDF_VECTORIZER = None
-# In-memory flood control cache
-user_behavior = {}
+user_behavior = {} # In-memory flood control cache
 
 # ================= Logging =================
 logging.basicConfig(
@@ -155,7 +149,6 @@ async def rule_check(message_text: str, message_entities: list[MessageEntity] | 
             else:
                 temp_url = url
                 
-            # --- CLEANUP: Simplified this logic ---
             try:
                 parsed_url = urlparse(temp_url)
                 domain = parsed_url.netloc.split(':')[0].lower().replace("www.", "")
@@ -164,7 +157,6 @@ async def rule_check(message_text: str, message_entities: list[MessageEntity] | 
                     return True, "has sent a Link without authorization"
             except Exception:
                 return True, "has sent a malformed URL"
-            # --- END CLEANUP ---
 
     # Rule 2.5: Block @mentions for new users in strict mode
     if is_critical_message and message_entities:
@@ -240,7 +232,6 @@ async def apply_auto_reaction(message: Message, bot: Bot):
     except TelegramError as e:
         logger.warning(f"Failed to apply auto-reaction in {message.chat_id}: {e}")
 
-# --- NEW HELPER FUNCTION ---
 async def get_admin_ids(chat: Chat, context: ContextTypes.DEFAULT_TYPE) -> list[int]:
     """
     Gets admin IDs from cache or refreshes cache if expired (1-hour TTL).
@@ -262,7 +253,6 @@ async def get_admin_ids(chat: Chat, context: ContextTypes.DEFAULT_TYPE) -> list[
             admin_ids = admin_ids or [] # Use old list if update fails
             
     return admin_ids or []
-# --- END NEW HELPER FUNCTION ---
 
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
@@ -278,9 +268,7 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    # --- REFACTOR: Use the new helper ---
     admin_ids = await get_admin_ids(update.effective_chat, context)
-    # --- END REFACTOR ---
 
     if user_id in admin_ids:
         return True
@@ -601,10 +589,12 @@ async def check_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_text += f"{'✅' if can_restrict else '❌'} **Can Restrict Members**: Required for mutes/bans.\n"
         status_text += f"{'✅' if can_react else '❌'} **Can Set Reactions**: Required for auto-reaction.\n\n"
         
-        if can_delete and can_restrict:
+        # --- FIXED LOGIC ---
+        if can_delete and can_restrict and can_react:
             status_text += "All critical permissions are **active**! 👍"
         else:
             status_text += "⚠️ **Warning:** Bot is missing critical permissions. Please grant these rights."
+        # --- END FIXED LOGIC ---
             
         await update.effective_message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
         
@@ -776,17 +766,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except TelegramError as e:
                     logger.warning(f"Failed to edit button message: {e}")
 
-async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message: return
-    if update.message.new_chat_members:
-        for member in update.message.new_chat_members:
-            if member.is_bot and member.id != context.bot.id:
-                try:
-                    await context.bot.ban_chat_member(update.message.chat_id, member.id)
-                except TelegramError as e: logger.warning(f"Could not ban bot {member.id}: {e}")
-    if update.message.left_chat_member or update.message.new_chat_members:
-        try: await update.message.delete()
-        except TelegramError: pass
+# --- THIS FUNCTION IS NO LONGER NEEDED, IT'S MERGED INTO message_handler ---
+# async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     ... (code deleted) ...
 
 
 # --- 
@@ -795,40 +777,54 @@ async def handle_status_updates(update: Update, context: ContextTypes.DEFAULT_TY
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
+    
+    # --- FIX: Handle status updates (join/left) FIRST ---
+    if update.message.new_chat_members or update.message.left_chat_member:
+        # Ban any new bots that aren't this bot
+        if update.message.new_chat_members:
+            for member in update.message.new_chat_members:
+                if member.is_bot and member.id != context.bot.id:
+                    try:
+                        await context.bot.ban_chat_member(update.message.chat_id, member.id)
+                    except TelegramError as e: 
+                        logger.warning(f"Could not ban new bot {member.id}: {e}")
+        
+        # Always delete the join/left message
+        try: 
+            await update.message.delete()
+        except TelegramError: 
+            pass
+        return # Stop processing after handling the status update
+    # --- END FIX ---
         
     user = update.message.from_user
     chat = update.effective_chat
     
-    # --- Check for message/caption early ---
     text = update.message.text or update.message.caption or ""
     entities = update.message.entities or update.message.caption_entities
 
     if not user or not chat: return
     
-    # --- Handle channel forwards FIRST ---
+    # Handle channel forwards
     if update.message.forward_origin and isinstance(update.message.forward_origin, MessageOriginChannel):
-        # This is a post from a linked channel
-        settings = await db.get_chat_settings(chat.id) # Get group's settings
+        settings = await db.get_chat_settings(chat.id)
         if settings.get("auto_reaction", False):
             await apply_auto_reaction(update.message, context.bot)
         return # Don't spam check channel posts
     
-    # --- Now check system bots ---
+    # Now check system bots
     if user.id in SYSTEM_BOT_IDS: return
         
-    # --- REFACTOR: Use the new helper ---
     admin_ids = await get_admin_ids(chat, context)
-    # --- END REFACTOR ---
     
-    # --- Check for Admins ---
+    # Check for Admins
     if user.id in admin_ids:
         settings = await db.get_chat_settings(chat.id)
-        # React to admin text or photos
         if settings.get("auto_reaction", False) and (text or update.message.photo): 
             await apply_auto_reaction(update.message, context.bot)
         return # Admins are never spam-checked
     
-    # --- Flood check for ALL messages (including stickers/media) ---
+    # Flood check for ALL messages (including stickers/media)
     await update_user_activity(chat.id, user.id) 
 
     async def handle_spam(reason_text: str):
@@ -856,7 +852,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{user.id}")]]
             
-            # --- This mute logic now applies to ANY group ---
             until_date = datetime.now() + timedelta(days=1)
             try:
                 await context.bot.restrict_chat_member(
@@ -874,10 +869,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except TelegramError as e: logger.error(f"Failed to send warning message: {e}")
             
-    # --- Check if this is a text/caption message before text-based spam checks ---
+    # Check if this is a text/caption message before text-based spam checks
     if not text:
         # It's a sticker, photo (no caption), etc.
-        # Check for flood spam ONLY
         if is_flood_spam(user.id):
             await handle_spam("is flooding the chat (media/stickers)")
         return # No text, so no more checks needed
@@ -902,10 +896,8 @@ def home():
 def ping():
     return "OK"
 
-# --- SECURED WEBHOOK ---
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def telegram_webhook(): 
-    # Check the secret token
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
         logger.warning("Received update with invalid secret token.")
         return "Unauthorized", 403
@@ -920,7 +912,6 @@ def telegram_webhook():
         except Exception as e:
             logger.error(f"Error handling incoming update payload: {e}", exc_info=True)
     return "OK"
-# --- END SECURED WEBHOOK ---
 
 # ================= Run Bot Server =================
 
@@ -957,16 +948,17 @@ async def setup_bot_application():
 
     application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*|unban:.*)$")) 
     
-    # --- This filter now catches media/sticker floods ---
+    # This filter now catches ALL messages, including status updates
     application.add_handler(MessageHandler(
         filters.ChatType.GROUPS & (filters.ALL & ~filters.COMMAND), 
         message_handler
     ))
     
-    application.add_handler(MessageHandler(
-        filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
-        handle_status_updates
-    ))
+    # --- THIS HANDLER IS NO LONGER NEEDED ---
+    # application.add_handler(MessageHandler(
+    #     filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
+    #     handle_status_updates
+    # ))
     
     application.job_queue.run_repeating(periodic_cleanup_job, interval=3600, first=5)
     logger.info("Scheduled periodic warning cleanup job.")
@@ -974,7 +966,6 @@ async def setup_bot_application():
     await application.initialize()
     await application.start()
 
-# --- SECURED WEBHOOK SETUP ---
 async def setup_webhook():
     if not WEBHOOK_URL:
         logger.error("FATAL: WEBHOOK_URL environment variable is not set.")
@@ -992,7 +983,6 @@ async def setup_webhook():
     except TelegramError as e:
         logger.error(f"Failed to set webhook: {e}")
         return False
-# --- END SECURED WEBHOOK SETUP ---
 
 async def serve_app():
     config = Config()
@@ -1018,7 +1008,6 @@ def main():
     if not WEBHOOK_URL:
         logger.critical("WEBHOOK_URL is missing. Bot will not receive updates.")
         
-    # --- Recommend setting this ---
     if WEBHOOK_SECRET == "a_very_strong_random_string_12345_replace_me":
         logger.warning("Using default WEBHOOK_SECRET. Please set a strong, random string in your environment variables.")
 
