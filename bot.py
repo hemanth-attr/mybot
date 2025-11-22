@@ -51,8 +51,15 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "a_very_strong_random_string_12345_
 BLOCK_ALL_URLS = False
 ALLOWED_DOMAINS = ["plus-ui.blogspot.com", "plus-ul.blogspot.com", "fineshopdesign.com"]
 
-# === REACTION CONFIG ===
-REACTION_LIST = ["🔥", "❤️‍🔥", "👍", "🤔", "😎", "🆒", "🫡", "❤️", "💯", "👀", "☃️", "🌚", "🎄", "⚡️", "🙏", "💘", "🏆", "👌", "👨‍💻", "🤗"]
+# === REACTION CONFIG (SAFE LIST ONLY) ===
+# These are used when you DON'T specify an emoji. 
+# 🤣 and others are excluded here but will work if you type them manually.
+REACTION_LIST = [
+    "🔥", "❤️‍🔥", "👍", "🤔", "😎", "🆒", "🫡", "❤️", "💯", "👀", 
+    "☃️", "🌚", "🎄", "⚡️", "🙏", "💘", "🏆", "👌", "👨‍💻", "🤗",
+    "🤝", "🍌", "🌭", "🐳", "💊", "🕊️"
+]
+
 # === SPAM DETECTION CONFIG ===
 SPAM_KEYWORDS = {
     "lottery", "deal", "coupon", "promo", "discount", "referral", "link in bio",
@@ -748,11 +755,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except TelegramError as e:
                     logger.warning(f"Failed to edit button message: {e}")
 
-# --- NEW PRIVATE REACTION HANDLER (SILENT FAILURE) ---
+# --- UPDATED PRIVATE REACTION HANDLER ---
 async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles private messages to apply reactions to group messages via Link.
-    SECURE VERSION (SILENT): If not admin, simply ignore (return).
+    Securely allows Admins to specify a reaction. 
+    Logic:
+    1. Checks if Admin.
+    2. Finds Emoji in text.
+    3. If Emoji found (custom), use it (even if it's 🤣).
+    4. If NO Emoji found, pick from SAFE RANDOM LIST.
     """
     if not update.message or not update.message.text:
         return
@@ -765,7 +777,6 @@ async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_
     match = re.search(link_pattern, text)
 
     if not match:
-        # Ignore normal text messages in private chat to avoid spamming the user
         return
 
     # 2. Extract Chat ID and Message ID
@@ -778,33 +789,36 @@ async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_
     else:
         final_chat_id = f"@{chat_identifier}"
 
-    # ================= SECURITY CHECK (SILENT) =================
+    # ================= SECURITY CHECK =================
     try:
         member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
-        # If user is NOT an administrator or creator, SILENTLY RETURN
         if member.status not in ["administrator", "creator"]:
             return 
-    except TelegramError:
-        # If we can't verify (bot not in chat, etc), SILENTLY RETURN
+    except TelegramError as e:
+        await update.message.reply_text(f"⚠️ **Error:** I cannot access that chat.\nDetails: {e}")
         return
-    # ===========================================================
+    # ==================================================
 
     # 3. Detect Custom Emoji
     clean_text = text.replace(match.group(0), "").strip()
     selected_reaction = None
     
     if clean_text:
+        # A. Check if it's in our SAFE list
         for reaction in REACTION_LIST:
             if reaction in clean_text:
                 selected_reaction = reaction
                 break
+        
+        # B. Fallback: Allows Custom Emojis (like 🤣) that are NOT in the safe list
         if not selected_reaction and len(clean_text) < 5:
             selected_reaction = clean_text
 
+    # 4. If no custom emoji, pick a SAFE one
     if not selected_reaction:
         selected_reaction = random.choice(REACTION_LIST)
 
-    # 4. Apply the Reaction
+    # 5. Apply the Reaction
     try:
         await context.bot.set_message_reaction(
             chat_id=final_chat_id,
@@ -815,9 +829,9 @@ async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_
         
     except TelegramError as e:
         logger.error(f"Failed to react: {e}")
-        await update.message.reply_text(f"❌ Failed to react.\nError: {e}")
+        await update.message.reply_text(f"❌ **Failed to react.**\nError: {e}")
 
-# --- UPDATED MESSAGE HANDLER (AUTO-REACTION REMOVED) ---
+# --- MESSAGE HANDLER ---
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -843,15 +857,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not user or not chat: return
     
-    # --- 1. Auto-Reaction for Channels REMOVED ---
-    
     if user.id in SYSTEM_BOT_IDS: return
         
     admin_ids = await get_admin_ids(chat, context)
     
     # Check for Admins
     if user.id in admin_ids:
-        # --- 2. Auto-Reaction for Admins REMOVED ---
         return # Admins are ignored for spam checks
     
     # --- Regular User Spam Checks ---
