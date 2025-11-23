@@ -53,7 +53,6 @@ ALLOWED_DOMAINS = ["plus-ui.blogspot.com", "plus-ul.blogspot.com", "fineshopdesi
 
 # === REACTION CONFIG (SAFE LIST ONLY) ===
 # Used when you send ONLY a link.
-# Negative/Mocking emojis (🤣, 🤡, 💩) are EXCLUDED here.
 REACTION_LIST = [
     "🔥", "❤️‍🔥", "👍", "🤔", "😎", "🆒", "🫡", "❤️", "💯", "👀", 
     "☃️", "🌚", "🎄", "⚡️", "🙏", "💘", "🏆", "👌", "👨‍💻", "🤗",
@@ -768,8 +767,8 @@ async def unreact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = context.args[0]
     user = update.effective_user
     
-    # Regex to find Telegram Message Links
-    link_pattern = r"t\.me/(?:c/)?(\d+|[\w\d_]+)/(\d+)"
+    # Updated Regex to capture http/https if present
+    link_pattern = r"(?:https?://)?(?:www\.)?t\.me/(?:c/)?(\d+|[\w\d_]+)/(\d+)"
     match = re.search(link_pattern, link)
 
     if not match:
@@ -789,8 +788,6 @@ async def unreact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
         if member.status not in ["administrator", "creator"]:
-            # Silent fail or msg? User asked for silent on private, but this is a command.
-            # Usually commands should reply.
             await update.message.reply_text("⛔ You must be an Admin to use this.")
             return 
     except TelegramError:
@@ -821,8 +818,8 @@ async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_
     text = update.message.text.strip()
     user = update.effective_user
     
-    # 1. Regex to find Telegram Message Links
-    link_pattern = r"t\.me/(?:c/)?(\d+|[\w\d_]+)/(\d+)"
+    # 1. UPDATED Regex: Consumes https:// and http:// so it doesn't get left in 'text'
+    link_pattern = r"(?:https?://)?(?:www\.)?t\.me/(?:c/)?(\d+|[\w\d_]+)/(\d+)"
     match = re.search(link_pattern, text)
 
     if not match:
@@ -847,15 +844,12 @@ async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # 3. Detect Reaction
-    # Remove the link from the text to see what is left
+    # Remove the ENTIRE matched link (including https://) from the text
     clean_text = text.replace(match.group(0), "").strip()
     selected_reaction = None
     
     if clean_text:
-        # LOGIC CHANGE: If user provided ANY text, assume it is an emoji.
-        # We trust the user wants to use THIS specific emoji/text.
-        # This allows "Link 🤣" to work even if 🤣 is not in safe list.
-        # This allows "Link lol" to fail gracefully via Telegram error.
+        # User provided specific text/emoji
         selected_reaction = clean_text
     else:
         # If text is empty, pick a RANDOM SAFE one
@@ -871,7 +865,6 @@ async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(f"✅ Reacted with {selected_reaction}")
         
     except TelegramError as e:
-        # This will catch invalid emojis (like "lol")
         await update.message.reply_text(f"❌ **Failed.**\nTelegram rejected '{selected_reaction}'.\nMake sure it is a valid single emoji.")
 
 # --- MESSAGE HANDLER ---
