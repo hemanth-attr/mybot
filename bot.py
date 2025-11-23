@@ -906,20 +906,45 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async def handle_spam(reason_text: str):
         try: await update.message.delete()
-        except TelegramError: pass
+        except TelegramError as e: logger.error(f"Failed to delete message: {e}")
         
         warn_count, expiry_dt = await db.add_warning_async(chat.id, user.id)
+        expiry_str = expiry_dt.strftime("%d/%m/%Y %H:%M")
         
+        user_mention = f"<a href='tg://user?id={user.id}'>{html.escape(user.first_name)}</a>"
+        user_display = f"{user_mention} [<code>{user.id}</code>]"
+        keyboard = None
+        caption = ""
+
         if warn_count <= 2:
-            caption = f"User {user.first_name} warned ({warn_count}/3). Reason: {reason_text}"
-            try: await context.bot.send_message(chat.id, caption)
-            except TelegramError: pass
+            caption = (
+                f"{user_display} {reason_text}.\n"
+                f"Action: Warn ({warn_count}/3) ❕ until {expiry_str}."
+            )
+            keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{user.id}")]]
         else:
-            until = datetime.now() + timedelta(hours=24)
-            try: 
-                await context.bot.restrict_chat_member(chat.id, user.id, ChatPermissions(can_send_messages=False), until_date=until)
-                await context.bot.send_message(chat.id, f"User {user.first_name} muted for 24h. Reason: {reason_text}")
-            except TelegramError: pass
+            caption = (
+                f"{user_display} has exceeded the warning limit.\n"
+                f"Action: Muted ({warn_count}/3) 🔇 until {expiry_str}."
+            )
+            keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{user.id}")]]
+            
+            until_date = datetime.now() + timedelta(days=1)
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=chat.id, user_id=user.id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=until_date
+                )
+            except TelegramError as e: logger.error(f"Failed to mute user {user.id}: {e}")
+        
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id, text=caption,
+                reply_markup=reply_markup, parse_mode=ParseMode.HTML
+            )
+        except TelegramError as e: logger.error(f"Failed to send warning message: {e}")
 
     if not text:
         if is_flood_spam(user.id):
