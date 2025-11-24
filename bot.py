@@ -330,7 +330,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/set_strict_mode [on/off]`: Toggle strict mode for new users.\n"
         "• `/set_ml_check [on/off]`: Toggle ML spam detection.\n"
         "• `/set_reaction_mode [on/off]`: Toggle auto-reactions.\n"
-        "• `/check_permissions`: Check bot's admin rights in this chat."
+        "• `/check_permissions`: Check bot's admin rights in this chat.\n"
+        "• `/replyto <link> <text>`: Reply to a message via link.\n"
+        "• `/react <link> <emoji>`: React to a message via link.\n"
+        "• `/unreact <link>`: Remove reactions from a message via link."
     )
     await update.effective_message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -754,6 +757,115 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except TelegramError as e:
                     logger.warning(f"Failed to edit button message: {e}")
 
+# --- REPLY TO COMMAND (NEW) ---
+async def reply_to_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Replies to a specific message link with text.
+    Usage: /replyto <link> <text>
+    """
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Usage: `/replyto <link> <text>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    link = context.args[0]
+    # Join the rest of the arguments to form the message text
+    text_to_send = " ".join(context.args[1:])
+    user = update.effective_user
+
+    # Regex to capture chat identifier and message ID
+    link_pattern = r"(?:https?://)?(?:www\.)?t\.me/(?:c/)?(\d+|[\w\d_]+)/(\d+)"
+    match = re.search(link_pattern, link)
+
+    if not match:
+        await update.message.reply_text("❌ Invalid link format.")
+        return
+
+    chat_identifier = match.group(1)
+    message_id = int(match.group(2))
+
+    # Determine Chat ID (Private vs Public)
+    final_chat_id = None
+    if chat_identifier.isdigit():
+        final_chat_id = int(f"-100{chat_identifier}")
+    else:
+        final_chat_id = f"@{chat_identifier}"
+
+    # Security Check: Ensure user is Admin in the target chat
+    try:
+        member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
+        if member.status not in ["administrator", "creator"]:
+            await update.message.reply_text("⛔ You must be an Admin of that chat to use this.")
+            return
+    except TelegramError:
+        await update.message.reply_text("❌ I cannot access that chat (I might not be an admin there).")
+        return
+
+    # Send the Reply
+    try:
+        await context.bot.send_message(
+            chat_id=final_chat_id,
+            text=text_to_send,
+            reply_to_message_id=message_id
+        )
+        await update.message.reply_text("✅ Reply sent successfully.")
+    except TelegramError as e:
+        await update.message.reply_text(f"❌ Failed to reply: {e}")
+
+
+# --- REACT COMMAND (NEW) ---
+async def react_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Reacts to a specific message link with an emoji.
+    Usage: /react <link> <emoji>
+    """
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Usage: `/react <link> <emoji>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    link = context.args[0]
+    emoji_to_set = context.args[1]
+    user = update.effective_user
+
+    # Regex to capture chat identifier and message ID
+    link_pattern = r"(?:https?://)?(?:www\.)?t\.me/(?:c/)?(\d+|[\w\d_]+)/(\d+)"
+    match = re.search(link_pattern, link)
+
+    if not match:
+        await update.message.reply_text("❌ Invalid link format.")
+        return
+
+    chat_identifier = match.group(1)
+    message_id = int(match.group(2))
+
+    # Determine Chat ID
+    final_chat_id = None
+    if chat_identifier.isdigit():
+        final_chat_id = int(f"-100{chat_identifier}")
+    else:
+        final_chat_id = f"@{chat_identifier}"
+
+    # Security Check
+    try:
+        member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
+        if member.status not in ["administrator", "creator"]:
+            await update.message.reply_text("⛔ You must be an Admin of that chat to use this.")
+            return
+    except TelegramError:
+        await update.message.reply_text("❌ I cannot access that chat.")
+        return
+
+    # Set the Reaction
+    try:
+        await context.bot.set_message_reaction(
+            chat_id=final_chat_id,
+            message_id=message_id,
+            reaction=[ReactionTypeEmoji(emoji=emoji_to_set)]
+        )
+        await update.message.reply_text(f"✅ Reacted with {emoji_to_set}")
+    except TelegramError as e:
+        await update.message.reply_text(f"❌ Failed: {e}")
+
+
 # --- UNREACT COMMAND ---
 async def unreact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -1020,8 +1132,10 @@ async def setup_bot_application():
     application.add_handler(CommandHandler("set_reaction_mode", set_reaction_mode, filters=filters.ChatType.GROUPS)) 
     application.add_handler(CommandHandler("check_permissions", check_permissions, filters=filters.ChatType.GROUPS))
     
-    # --- NEW: UNREACT COMMAND ---
+    # --- NEW COMMANDS ---
     application.add_handler(CommandHandler("unreact", unreact_command))
+    application.add_handler(CommandHandler("replyto", reply_to_command))
+    application.add_handler(CommandHandler("react", react_command))
 
     application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*|unban:.*)$")) 
     
