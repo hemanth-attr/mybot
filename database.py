@@ -225,3 +225,48 @@ async def increment_user_initial_count(chat_id: int, user_id: int, max_count: in
             """,
             chat_id, user_id, max_count
         )
+# ================= NEW: ANNOUNCEMENT SCHEDULER =================
+
+async def add_announcement(chat_id: int, text: str, type_: str, time_val: str) -> int:
+    pool = await get_pool()
+    if not pool: return -1
+    async with pool.acquire() as conn:
+        # Create table if it doesn't exist yet (safety check)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS announcements (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                text TEXT,
+                type TEXT,
+                time_val TEXT,
+                last_run TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        row = await conn.fetchrow(
+            "INSERT INTO announcements (chat_id, text, type, time_val) VALUES ($1, $2, $3, $4) RETURNING id",
+            chat_id, text, type_, time_val
+        )
+        return row['id']
+
+async def remove_announcement(ann_id: int):
+    pool = await get_pool()
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM announcements WHERE id = $1", ann_id)
+
+async def get_all_announcements():
+    pool = await get_pool()
+    if not pool: return []
+    async with pool.acquire() as conn:
+        # Create table if it doesn't exist yet (safety check)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS announcements (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                text TEXT,
+                type TEXT,
+                time_val TEXT,
+                last_run TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        return await conn.fetch("SELECT * FROM announcements")
