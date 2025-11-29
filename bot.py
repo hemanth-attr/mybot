@@ -34,7 +34,12 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     logging.critical("FATAL: TOKEN environment variable not set.")
 
-CHANNELS = ["@Blogger_Templates_Updated", "@Plus_UI_Official"]
+# === Channel Configuration ===
+CHANNEL_DATA = {
+    -1002548514150: "https://t.me/Blogger_Templates_Updated",
+    -1002810504524: "https://t.me/Plus_UI_Official"
+}
+CHANNELS = list(CHANNEL_DATA.keys())
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.2.0%20(Updated).zip"
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
@@ -859,10 +864,13 @@ async def is_member_all(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> boo
 
 async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
     """Sends the message prompting the user to join channels."""
+    # Get links directly from your config
+    link_1 = CHANNEL_DATA[CHANNELS[0]]
+    link_2 = CHANNEL_DATA[CHANNELS[1]]
     keyboard = [
         [
-            InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNELS[0].strip('@')}"),
-            InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{CHANNELS[1].strip('@')}")
+            InlineKeyboardButton("📢 Join Channel", url=link_1),
+            InlineKeyboardButton("👥 Join Group", url=link_2)
         ],
         [InlineKeyboardButton("✅ Done!!!", callback_data="done")]
     ]
@@ -937,18 +945,25 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.edit_text("⚠️ Session expired. Please run /ntf again.")
             return
             
-        target = data.replace("ntf_sel_", "")
+        target_str = data.replace("ntf_sel_", "")
         
         # Determine targets
-        targets = []
-        if target == "ALL_CHANNELS":
-            targets = CHANNELS # Uses your global CHANNELS list
+        target_ids = []
+        if target_str == "ALL_CHANNELS":
+            # CHANNELS is now a list of ID numbers from your config
+            target_ids = CHANNELS 
         else:
-            targets = [target]
+            # FIX: Convert the string ID (from the button data) back to an Integer
+            try:
+                target_ids = [int(target_str)]
+            except ValueError:
+                await query.message.edit_text("❌ Error: Invalid ID format.")
+                return
             
         results = []
-        for t in targets:
-            res = await schedule_announcement(t, draft['cmd'], draft['time'], draft['text'], context)
+        for chat_id in target_ids:
+            # Now passing an Integer (chat_id) to the database function
+            res = await schedule_announcement(chat_id, draft['cmd'], draft['time'], draft['text'], context)
             results.append(res)
             
         final_text = "**Done!**\n" + "\n".join(results)
@@ -1184,17 +1199,25 @@ async def unreact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Failed: {e}")
 
 
-# --- EDIT MESSAGE COMMAND (RECOMMENDED NEW FEATURE) ---
+# --- EDIT MESSAGE COMMAND ---
 async def edit_message_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Edits a message sent by the bot via its link.
     Usage: /edit <link> <new_text>
     """
-    if not context.args or len(context.args) < 2:
+    # FIX: Check raw text length first
+    if not update.message.text: 
+        return
+
+    # FIX: Split the raw message text into exactly 3 parts
+    parts = update.message.text.split(None, 2)
+
+    if len(parts) < 3:
         await update.message.reply_text("Usage: `/edit <link> <new_text>`", parse_mode=ParseMode.MARKDOWN)
         return
-    link = context.args[0]
-    new_text = " ".join(context.args[1:])
+
+    link = parts[1]
+    new_text = parts[2] # This preserves newlines!
     user = update.effective_user
 
     ids = _parse_link_identifiers(link)
@@ -1221,7 +1244,6 @@ async def edit_message_command(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ Failed. (I can only edit messages *I* sent).")
         else:
             await update.message.reply_text(f"❌ Failed to edit: {e}")
-
 
 # --- DELETE MESSAGE COMMAND (RECOMMENDED NEW FEATURE) ---
 async def delete_message_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
