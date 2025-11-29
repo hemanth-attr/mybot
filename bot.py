@@ -369,24 +369,30 @@ async def execute_announcement(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to send announcement: {e}")
 
 async def ntf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Define variables immediately
     chat = update.effective_chat
     user = update.effective_user
-    # Check admin
-    if not await is_admin(update, context):
-        # Allow system admins in private chat
-        if update.effective_chat.type == ChatType.PRIVATE and update.effective_user.id in SYSTEM_BOT_IDS:
-            pass
-        else:
-            return
-
     args = context.args
-    chat_id = update.effective_chat.id
+
+    # 2. SEPARATE LOGIC: Private vs Group
+    # We check Private Chat FIRST to avoid triggering is_admin's error message
+    if chat.type == ChatType.PRIVATE:
+        # PRIVATE CHAT: Only allow System Admins
+        if user.id not in SYSTEM_BOT_IDS:
+            return  # Ignore random users
+        # If valid System Admin, we proceed (we do NOT call is_admin)
+    else:
+        # GROUP CHAT: Check actual admin permissions
+        if not await is_admin(update, context):
+            return  # is_admin handles the "Not Admin" reply
+
+    chat_id = chat.id
 
     # --- LIST / REMOVE ---
     if args and args[0].lower() == "list":
         rows = await db.get_all_announcements()
         # In private, show ALL. In group, show group's only.
-        if update.effective_chat.type == ChatType.PRIVATE:
+        if chat.type == ChatType.PRIVATE:
             display_rows = rows
         else:
             display_rows = [r for r in rows if r['chat_id'] == chat_id]
@@ -412,7 +418,11 @@ async def ntf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- CREATE NEW SCHEDULE ---
-    if len(args) < 3:
+    # Need at least 3 parts: /ntf <cmd> <time> <text>
+    # logic: split by whitespace, max 3 splits -> [cmd, sub, time, text]
+    parts = update.message.text.split(None, 3)
+
+    if len(parts) < 4:
         await update.message.reply_text(
             "📢 **Scheduler Help**\n"
             "`/ntf daily 14:00 Text`\n"
@@ -422,13 +432,13 @@ async def ntf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    sub_cmd = args[0].lower()
-    time_val = args[1]
-    msg_text = " ".join(args[2:])
+    sub_cmd = parts[1].lower() # e.g. "daily"
+    time_val = parts[2]        # e.g. "14:00"
+    msg_text = parts[3]        # The rest of the message (PRESERVES NEWLINES)
     
     # A. If in Group -> Schedule Immediately for THIS group
-    if update.effective_chat.type != ChatType.PRIVATE:
-        await schedule_announcement(update.effective_chat.id, sub_cmd, time_val, msg_text, context, update.message)
+    if chat.type != ChatType.PRIVATE:
+        await schedule_announcement(chat.id, sub_cmd, time_val, msg_text, context, update.message)
         return
 
     # B. If in Private -> Show Selection Wizard
@@ -458,7 +468,6 @@ async def ntf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.HTML
     )
-
 # --- HELPER TO EXECUTE SCHEDULE ---
 async def schedule_announcement(target_chat_id, sub_cmd, time_val, msg_text, context, reply_msg=None):
     try:
@@ -1073,11 +1082,22 @@ def _parse_link_identifiers(link: str) -> Optional[tuple[Any, int]]:
 # --- REPLY TO COMMAND (NEW) ---
 async def reply_to_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Replies to a specific message link with text."""
-    if not context.args or len(context.args) < 2:
+    # FIX: Check raw text length first to avoid errors
+    if not update.message.text: 
+        return
+
+    # FIX: Split the raw message text into exactly 3 parts:
+    # 0: /replyto
+    # 1: link
+    # 2: The rest of the message (preserves newlines/formatting)
+    parts = update.message.text.split(None, 2)
+
+    if len(parts) < 3:
         await update.message.reply_text("Usage: `/replyto <link> <text>`", parse_mode=ParseMode.MARKDOWN)
         return
-    link = context.args[0]
-    text_to_send = " ".join(context.args[1:])
+
+    link = parts[1]
+    text_to_send = parts[2] # This variable now keeps your line breaks!
     user = update.effective_user
 
     ids = _parse_link_identifiers(link)
