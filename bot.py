@@ -6,7 +6,7 @@ import html
 import joblib
 import time
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 from flask import Flask, request
 from unidecode import unidecode
 from telegram import (
@@ -19,7 +19,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters, Application
 )
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest
 from urllib.parse import urlparse
 from typing import cast, Any, Optional
 from hypercorn.asyncio import serve
@@ -80,6 +80,8 @@ FLOOD_MESSAGE_COUNT = 3
 ML_MODEL = None
 TFIDF_VECTORIZER = None
 user_behavior = {} # In-memory flood control cache
+# Add this here:
+URL_FINDER_REGEX = re.compile(r'((?:https?://|www\.|t\.me/)\S+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\S*)', re.I)
 
 # ================= Logging =================
 logging.basicConfig(
@@ -142,9 +144,7 @@ async def rule_check(message_text: str, message_entities: list[MessageEntity] | 
 
     # Rule 2: Block all other URLs if BLOCK_ALL_URLS is enabled (or for new users)
     if BLOCK_ALL_URLS or is_critical_message:
-        url_finder = re.compile(r'((?:https?://|www\.|t\.me/)\S+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\S*)', re.I)
-        
-        found_urls = url_finder.findall(text_lower)
+        found_urls = URL_FINDER_REGEX.findall(text_lower)
         allowed_domains_lower = [d.lower() for d in ALLOWED_DOMAINS]
 
         for url in found_urls:
@@ -312,6 +312,127 @@ def _create_unmute_permissions() -> ChatPermissions:
         can_pin_messages=False
     )
 
+# --- NEW: REPORT COMMAND ---
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not msg.reply_to_message:
+        await msg.reply_text("ℹ️ Reply to a message with `/report` to alert admins.")
+        return
+
+    reported_msg = msg.reply_to_message
+    reported_user = reported_msg.from_user
+    status_msg = await msg.reply_text("📨 Alerting admins...")
+    
+    # Get admins
+    admin_ids = await get_admin_ids(chat, context)
+    
+    report_text = (
+        f"🚨 **New Report in {html.escape(chat.title)}**\n"
+        f"• **Reporter:** {user.mention_html()}\n"
+        f"• **Target:** {reported_user.mention_html()} (ID: `{reported_user.id}`)\n"
+        f"• <a href='{reported_msg.link}'>Go to Message</a>"
+    )
+
+    # Admin Buttons
+    # Syntax: action:chat_id:user_id:msg_id
+    data_base = f":{chat.id}:{reported_user.id}:{reported_msg.message_id}"
+    keyboard = [
+        [
+            InlineKeyboardButton("🗑 Del", callback_data=f"rep_del{data_base}"),
+            InlineKeyboardButton("🔇 Mute", callback_data=f"rep_mute{data_base}")
+        ],
+        [
+            InlineKeyboardButton("🔨 Ban", callback_data=f"rep_ban{data_base}"),
+            InlineKeyboardButton("🚫 Ignore", callback_data="rep_ignore")
+        ]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    sent_count = 0
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=report_text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            sent_count += 1
+        except Exception: pass
+
+    await status_msg.edit_text(f"✅ Reported to {sent_count} admins.")
+
+# --- NEW: SCHEDULER (/ntf) ---
+async def execute_announcement(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    try:
+        await context.bot.send_message(chat_id=job.chat_id, text=job.data)
+    except Exception as e:
+        logger.error(f"Failed to send announcement: {e}")
+
+async def ntf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context): return
+    args = context.args
+    chat_id = update.effective_chat.id
+
+    if not args:
+        await update.message.reply_text(
+            "📢 **Scheduler Help**\n"
+            "`/ntf daily 14:00 Text`\n"
+            "`/ntf every 1h Text`\n"
+            "`/ntf once 30m Text`\n"
+            "`/ntf list`\n"
+            "`/ntf remove ID`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    sub_cmd = args[0].lower()
+    
+    if sub_cmd == "list":
+        rows = await db.get_all_announcements()
+        chat_rows = [r for r in rows if r['chat_id'] == chat_id]
+        if not chat_rows:
+            await update.message.reply_text("No active announcements.")
+            return
+        text = "📅 **Active:**\n"
+        for r in chat_rows:
+            text += f"ID `{r['id']}` | {r['type']} {r['time_val']} | {r['text'][:15]}...\n"
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if sub_cmd == "remove":
+        try:
+            ann_id = int(args[1])
+            await db.remove_announcement(ann_id)
+            for job in context.job_queue.get_jobs_by_name(f"ann_{ann_id}"):
+                job.schedule_removal()
+            await update.message.reply_text(f"✅ Announcement {ann_id} removed.")
+        except:
+            await update.message.reply_text("Invalid ID.")
+        return
+
+    # Add Logic
+    if len(args) < 3: return
+    time_val = args[1]
+    msg_text = " ".join(args[2:])
+    
+    ann_id = await db.add_announcement(chat_id, msg_text, sub_cmd, time_val)
+    
+    # Schedule immediately
+    try:
+        if sub_cmd == "daily":
+            h, m = map(int, time_val.split(':'))
+            context.job_queue.run_daily(execute_announcement, dt_time(hour=h, minute=m), chat_id=chat_id, data=msg_text, name=f"ann_{ann_id}")
+        elif sub_cmd in ["every", "once"]:
+            unit = time_val[-1].lower()
+            val = int(time_val[:-1])
+            secs = val * 60 if unit == 'm' else val * 3600
+            if sub_cmd == "every":
+                context.job_queue.run_repeating(execute_announcement, interval=secs, first=10, chat_id=chat_id, data=msg_text, name=f"ann_{ann_id}")
+            else:
+                context.job_queue.run_once(execute_announcement, when=secs, chat_id=chat_id, data=msg_text, name=f"ann_{ann_id}")
+        await update.message.reply_text(f"✅ Scheduled (ID: `{ann_id}`)")
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
 # ================= Admin Command Handlers =================
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -682,6 +803,29 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query: return
     data = query.data
     await query.answer()
+    # --- REPORT ACTIONS ---
+    if data.startswith("rep_"):
+        if data == "rep_ignore":
+            await query.message.delete()
+            return
+
+        action, c_id, u_id, m_id = data.split(":")
+        c_id, u_id, m_id = int(c_id), int(u_id), int(m_id)
+
+        try:
+            if "del" in action:
+                await context.bot.delete_message(c_id, m_id)
+                await query.message.edit_text("✅ Deleted")
+            elif "mute" in action:
+                until = datetime.now() + timedelta(hours=24)
+                await context.bot.restrict_chat_member(c_id, u_id, ChatPermissions(can_send_messages=False), until_date=until)
+                await query.message.edit_text("✅ Muted 24h")
+            elif "ban" in action:
+                await context.bot.ban_chat_member(c_id, u_id)
+                await query.message.edit_text("✅ Banned")
+        except Exception as e:
+            await query.message.edit_text(f"❌ Error: {e}")
+        return
     
     # ================= 1. Done / Verified (File Gating) =================
     if data == "done":
@@ -798,7 +942,7 @@ async def reply_to_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
-        if member.status not in ["administrator", "creator"]:
+        if member.status not in ["administrator", "creator", "owner"]:
             await update.message.reply_text("⛔ You must be an Admin of that chat to use this.")
             return
     except TelegramError:
@@ -830,7 +974,7 @@ async def react_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
-        if member.status not in ["administrator", "creator"]:
+        if member.status not in ["administrator", "creator", "owner"]:
             await update.message.reply_text("⛔ You must be an Admin of that chat to use this.")
             return
     except TelegramError:
@@ -860,7 +1004,7 @@ async def unreact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
-        if member.status not in ["administrator", "creator"]:
+        if member.status not in ["administrator", "creator", "owner"]:
             await update.message.reply_text("⛔ You must be an Admin to use this.")
             return 
     except TelegramError:
@@ -896,7 +1040,7 @@ async def edit_message_command(update: Update, context: ContextTypes.DEFAULT_TYP
     # Security Check
     try:
         member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
-        if member.status not in ["administrator", "creator"]:
+        if member.status not in ["administrator", "creator", "owner"]:
             await update.message.reply_text("⛔ You must be an Admin to use this.")
             return
     except TelegramError:
@@ -934,7 +1078,7 @@ async def delete_message_command(update: Update, context: ContextTypes.DEFAULT_T
     # Security Check
     try:
         member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
-        if member.status not in ["administrator", "creator"]:
+        if member.status not in ["administrator", "creator", "owner"]:
             await update.message.reply_text("⛔ You must be an Admin to use this.")
             return
     except TelegramError:
@@ -969,7 +1113,7 @@ async def pin_message_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Security Check
     try:
         member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
-        if member.status not in ["administrator", "creator"]:
+        if member.status not in ["administrator", "creator", "owner"]:
             await update.message.reply_text("⛔ You must be an Admin to use this.")
             return
     except TelegramError:
@@ -1016,7 +1160,7 @@ async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_
     # Security Check (Silent fail if not admin)
     try:
         member = await context.bot.get_chat_member(chat_id=final_chat_id, user_id=user.id)
-        if member.status not in ["administrator", "creator"]:
+        if member.status not in ["administrator", "creator", "owner"]:
             return 
     except TelegramError:
         return
@@ -1183,7 +1327,35 @@ async def setup_bot_application():
         
     # Add handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command)) 
+    application.add_handler(CommandHandler("help", help_command))
+    # NEW HANDLERS
+    application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("ntf", ntf_command))
+    
+    # LOAD SAVED SCHEDULES
+    rows = await db.get_all_announcements()
+    for row in rows:
+        try:
+            ann_id, c_id, txt, typ, val = row['id'], row['chat_id'], row['text'], row['type'], row['time_val']
+            if typ == "daily":
+                h, m = map(int, val.split(':'))
+                application.job_queue.run_daily(execute_announcement, dt_time(hour=h, minute=m), chat_id=c_id, data=txt, name=f"ann_{ann_id}")
+            elif typ == "every":
+                unit = val[-1].lower()
+                v = int(val[:-1])
+                secs = v * 60 if unit == 'm' else v * 3600
+                application.job_queue.run_repeating(execute_announcement, interval=secs, first=10, chat_id=c_id, data=txt, name=f"ann_{ann_id}")
+            # --- ADD THIS BLOCK ---
+            elif typ == "once":
+                # For 'once', we need to check if it's still valid or just run it on delay
+                unit = val[-1].lower()
+                v = int(val[:-1])
+                secs = v * 60 if unit == 'm' else v * 3600
+                # Note: This resets the timer on restart. 
+                # For exact precision, you'd need to save the target timestamp in DB, not just "30m"
+                application.job_queue.run_once(execute_announcement, when=secs, chat_id=c_id, data=txt, name=f"ann_{ann_id}")
+            # ----------------------
+        except Exception: pass
     
     application.add_handler(CommandHandler("mute", mute_user, filters=filters.ChatType.GROUPS))
     application.add_handler(CommandHandler("unmute", unmute_user_command, filters=filters.ChatType.GROUPS)) 
@@ -1203,7 +1375,7 @@ async def setup_bot_application():
     application.add_handler(CommandHandler("del", delete_message_command))
     application.add_handler(CommandHandler("pin", pin_message_command))
 
-    application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*|unban:.*)$")) 
+    application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*|unban:.*|rep_.*)$")) 
     
     # --- HANDLER FOR PRIVATE REACTIONS ---
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, handle_private_reaction))
