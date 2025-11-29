@@ -369,15 +369,15 @@ async def execute_announcement(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to send announcement: {e}")
 
 async def ntf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Private Chat Logic (System Admins Only)
-    if chat.type == ChatType.PRIVATE:
-        if user.id not in SYSTEM_BOT_IDS:
-            return  # Ignore random users in DM
-        # If it is you (System Admin), we SKIP the is_admin() check completely
-        
-    # 2. Group Chat Logic (Actual Admins Only)
-    elif not await is_admin(update, context):
-        return  # is_admin() will handle the error reply for non-admins
+    chat = update.effective_chat
+    user = update.effective_user
+    # Check admin
+    if not await is_admin(update, context):
+        # Allow system admins in private chat
+        if update.effective_chat.type == ChatType.PRIVATE and update.effective_user.id in SYSTEM_BOT_IDS:
+            pass
+        else:
+            return
 
     args = context.args
     chat_id = update.effective_chat.id
