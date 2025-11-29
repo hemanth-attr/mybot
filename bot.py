@@ -455,8 +455,11 @@ async def ntf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = []
     # 1. Add specific channels from config
-    for ch in CHANNELS:
-        keyboard.append([InlineKeyboardButton(f"Channel: {ch}", callback_data=f"ntf_sel_{ch}")])
+    for ch_id, link in CHANNEL_DATA.items():
+        
+        name = link.split("/")[-1]
+        
+        keyboard.append([InlineKeyboardButton(f"Channel: @{name}", callback_data=f"ntf_sel_{ch_id}")])
         
     # 2. Add 'All' option
     keyboard.append([InlineKeyboardButton("📢 Send to All Channels", callback_data="ntf_sel_ALL_CHANNELS")])
