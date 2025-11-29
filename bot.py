@@ -369,37 +369,36 @@ async def execute_announcement(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to send announcement: {e}")
 
 async def ntf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context): return
+    # Check admin
+    if not await is_admin(update, context):
+        # Allow system admins in private chat
+        if update.effective_chat.type == ChatType.PRIVATE and update.effective_user.id in SYSTEM_BOT_IDS:
+            pass
+        else:
+            return
+
     args = context.args
     chat_id = update.effective_chat.id
 
-    if not args:
-        await update.message.reply_text(
-            "📢 **Scheduler Help**\n"
-            "`/ntf daily 14:00 Text`\n"
-            "`/ntf every 1h Text`\n"
-            "`/ntf once 30m Text`\n"
-            "`/ntf list`\n"
-            "`/ntf remove ID`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    sub_cmd = args[0].lower()
-    
-    if sub_cmd == "list":
+    # --- LIST / REMOVE ---
+    if args and args[0].lower() == "list":
         rows = await db.get_all_announcements()
-        chat_rows = [r for r in rows if r['chat_id'] == chat_id]
-        if not chat_rows:
-            await update.message.reply_text("No active announcements.")
+        # In private, show ALL. In group, show group's only.
+        if update.effective_chat.type == ChatType.PRIVATE:
+            display_rows = rows
+        else:
+            display_rows = [r for r in rows if r['chat_id'] == chat_id]
+            
+        if not display_rows:
+            await update.message.reply_text("No active announcements found.")
             return
-        text = "📅 **Active:**\n"
-        for r in chat_rows:
-            text += f"ID `{r['id']}` | {r['type']} {r['time_val']} | {r['text'][:15]}...\n"
+        text = "📅 **Active Schedules:**\n"
+        for r in display_rows:
+            text += f"ID `{r['id']}` | Chat `{r['chat_id']}` | {r['type']} {r['time_val']} | {r['text'][:15]}...\n"
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
         return
 
-    if sub_cmd == "remove":
+    if args and args[0].lower() == "remove":
         try:
             ann_id = int(args[1])
             await db.remove_announcement(ann_id)
@@ -410,29 +409,81 @@ async def ntf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Invalid ID.")
         return
 
-    # Add Logic
-    if len(args) < 3: return
+    # --- CREATE NEW SCHEDULE ---
+    if len(args) < 3:
+        await update.message.reply_text(
+            "📢 **Scheduler Help**\n"
+            "`/ntf daily 14:00 Text`\n"
+            "`/ntf every 1h Text`\n"
+            "`/ntf once 30m Text`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    sub_cmd = args[0].lower()
     time_val = args[1]
     msg_text = " ".join(args[2:])
     
-    ann_id = await db.add_announcement(chat_id, msg_text, sub_cmd, time_val)
+    # A. If in Group -> Schedule Immediately for THIS group
+    if update.effective_chat.type != ChatType.PRIVATE:
+        await schedule_announcement(update.effective_chat.id, sub_cmd, time_val, msg_text, context, update.message)
+        return
+
+    # B. If in Private -> Show Selection Wizard
+    context.user_data['ntf_draft'] = {
+        'cmd': sub_cmd,
+        'time': time_val,
+        'text': msg_text
+    }
     
-    # Schedule immediately
+    keyboard = []
+    # 1. Add specific channels from config
+    for ch in CHANNELS:
+        keyboard.append([InlineKeyboardButton(f"Channel: {ch}", callback_data=f"ntf_sel_{ch}")])
+        
+    # 2. Add 'All' option
+    keyboard.append([InlineKeyboardButton("📢 Send to All Channels", callback_data="ntf_sel_ALL_CHANNELS")])
+    
+    # 3. Add Cancel
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="ntf_sel_cancel")])
+    
+    await update.message.reply_text(
+        f"📝 **Draft Announcement**\n"
+        f"• Type: {sub_cmd}\n"
+        f"• Time: {time_val}\n"
+        f"• Text: {html.escape(msg_text)}\n\n"
+        f"👇 **Where should I schedule this?**",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
+
+# --- HELPER TO EXECUTE SCHEDULE ---
+async def schedule_announcement(target_chat_id, sub_cmd, time_val, msg_text, context, reply_msg=None):
     try:
+        ann_id = await db.add_announcement(target_chat_id, msg_text, sub_cmd, time_val)
+        
+        # Schedule logic
         if sub_cmd == "daily":
             h, m = map(int, time_val.split(':'))
-            context.job_queue.run_daily(execute_announcement, dt_time(hour=h, minute=m), chat_id=chat_id, data=msg_text, name=f"ann_{ann_id}")
+            context.job_queue.run_daily(execute_announcement, dt_time(hour=h, minute=m), chat_id=target_chat_id, data=msg_text, name=f"ann_{ann_id}")
         elif sub_cmd in ["every", "once"]:
             unit = time_val[-1].lower()
             val = int(time_val[:-1])
             secs = val * 60 if unit == 'm' else val * 3600
             if sub_cmd == "every":
-                context.job_queue.run_repeating(execute_announcement, interval=secs, first=10, chat_id=chat_id, data=msg_text, name=f"ann_{ann_id}")
+                context.job_queue.run_repeating(execute_announcement, interval=secs, first=10, chat_id=target_chat_id, data=msg_text, name=f"ann_{ann_id}")
             else:
-                context.job_queue.run_once(execute_announcement, when=secs, chat_id=chat_id, data=msg_text, name=f"ann_{ann_id}")
-        await update.message.reply_text(f"✅ Scheduled (ID: `{ann_id}`)")
+                context.job_queue.run_once(execute_announcement, when=secs, chat_id=target_chat_id, data=msg_text, name=f"ann_{ann_id}")
+        
+        result_text = f"✅ Scheduled for `{target_chat_id}` (ID: `{ann_id}`)"
+        if reply_msg:
+            await reply_msg.reply_text(result_text, parse_mode=ParseMode.MARKDOWN)
+        return result_text
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        err_text = f"❌ Error: {e}"
+        if reply_msg:
+            await reply_msg.reply_text(err_text)
+        return err_text
 # ================= Admin Command Handlers =================
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -561,23 +612,81 @@ async def unban_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text(f"Failed to unban user: {e}")
 
 async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_chat: return
-    if not await is_admin(update, context): return
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    # --- 1. Admin Permission Check ---
+    if not await is_admin(update, context):
+        # Exception: Allow System Admins to use command in Private Chat
+        if chat.type == ChatType.PRIVATE and user.id in SYSTEM_BOT_IDS:
+            pass
+        else:
+            return
+
+    # --- 2. PRIVATE CHAT MODE (Remote Warn via Link) ---
+    if chat.type == ChatType.PRIVATE:
+        if not context.args:
+            await update.message.reply_text("usage: `/warn <link> <reason>`", parse_mode=ParseMode.MARKDOWN)
+            return
+            
+        target_arg = context.args[0]
+        reason = " ".join(context.args[1:]) if len(context.args) > 1 else "Violation of rules."
+        
+        # Parse the link to get Chat ID and Message ID
+        ids = _parse_link_identifiers(target_arg)
+        
+        if ids:
+            target_chat_id, target_msg_id = ids
+            try:
+                # Step A: Reply to the bad message in the group with the warning
+                await context.bot.send_message(
+                    chat_id=target_chat_id,
+                    text=f"⚠️ <b>Admin Warning</b>\nReason: {html.escape(reason)}",
+                    reply_to_message_id=target_msg_id,
+                    parse_mode=ParseMode.HTML
+                )
+                
+                # Step B: Delete the bad message
+                await context.bot.delete_message(chat_id=target_chat_id, message_id=target_msg_id)
+                
+                await update.message.reply_text("✅ **Success:** Message deleted and warning sent to the group.")
+            except TelegramError as e:
+                await update.message.reply_text(f"❌ **Error:** {e}")
+            return
+            
+        else:
+            await update.message.reply_text("⚠️ Invalid link. Use `/warn <link> <reason>`")
+            return
+
+    # --- 3. GROUP CHAT MODE (Your Original Feature) ---
+    # This block runs ONLY in groups, preserving the DB counting and Muting logic.
+    
     target = await get_target_user_id(update, context)
     if not target: return
     target_id, target_display = target
+    
     reason = "Manually warned by Admin"
     if context.args:
-        reason_args = context.args[1:] if (context.args[0].isdigit() or context.args[0].startswith('@')) else context.args
+        # If args exist, check if the first one was the user ID/Username (which get_target handled)
+        # If so, the reason starts at index 1. If it was a reply, reason starts at 0.
+        if (context.args[0].isdigit() or context.args[0].startswith('@')):
+             reason_args = context.args[1:]
+        else:
+             reason_args = context.args
+             
         if reason_args:
             reason = "Admin Warn: " + " ".join(reason_args)
+
     if target_id == context.bot.id:
-        await update.effective_message.reply_text("I cannot warn myself!")
+        await update.message.reply_text("I cannot warn myself!")
         return
+
     try:
-        warn_count, expiry_dt = await db.add_warning_async(update.effective_chat.id, target_id)
+        # Add to Database
+        warn_count, expiry_dt = await db.add_warning_async(chat.id, target_id)
         expiry_str = expiry_dt.strftime("%d/%m/%Y %H:%M")
         
+        # Decide Action (Warn vs Mute)
         if warn_count <= 2:
             caption = (
                 f"⚠️ **Warning Issued**\n"
@@ -585,11 +694,12 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• Action: Warn ({warn_count}/3) ❕ until {expiry_str}.\n"
                 f"• Reason: {html.escape(reason)}"
             )
-            keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{update.effective_chat.id}:{target_id}")]]
+            keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{target_id}")]]
         else:
+            # Exceeded limit -> Mute
             until_date = datetime.now() + timedelta(days=1)
             await context.bot.restrict_chat_member(
-                chat_id=update.effective_chat.id, user_id=target_id,
+                chat_id=chat.id, user_id=target_id,
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=until_date
             )
@@ -599,13 +709,13 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• Action: Muted ({warn_count}/3) 🔇 until {expiry_str}.\n"
                 f"• Reason: {html.escape(reason)}"
             )
-            keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{update.effective_chat.id}:{target_id}")]]
+            keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{chat.id}:{target_id}")]]
             
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.effective_message.reply_text(caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-        logger.info(f"Admin {update.effective_user.id} warned user {target_id}. Count: {warn_count}")
+        await update.message.reply_text(caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        
     except Exception as e:
-        await update.effective_message.reply_text(f"Failed to process warning: {e}")
+        await update.message.reply_text(f"Failed to process warning: {e}")
 
 async def set_strict_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_chat: return
@@ -803,6 +913,40 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query: return
     data = query.data
     await query.answer()
+    # --- NTF SELECTION HANDLER ---
+    if data.startswith("ntf_sel_"):
+        if data == "ntf_sel_cancel":
+            if 'ntf_draft' in context.user_data:
+                del context.user_data['ntf_draft']
+            await query.message.edit_text("❌ Scheduling cancelled.")
+            return
+            
+        draft = context.user_data.get('ntf_draft')
+        if not draft:
+            await query.message.edit_text("⚠️ Session expired. Please run /ntf again.")
+            return
+            
+        target = data.replace("ntf_sel_", "")
+        
+        # Determine targets
+        targets = []
+        if target == "ALL_CHANNELS":
+            targets = CHANNELS # Uses your global CHANNELS list
+        else:
+            targets = [target]
+            
+        results = []
+        for t in targets:
+            res = await schedule_announcement(t, draft['cmd'], draft['time'], draft['text'], context)
+            results.append(res)
+            
+        final_text = "**Done!**\n" + "\n".join(results)
+        await query.message.edit_text(final_text, parse_mode=ParseMode.MARKDOWN)
+        
+        # Clean up draft
+        if 'ntf_draft' in context.user_data:
+            del context.user_data['ntf_draft']
+        return
     # --- REPORT ACTIONS ---
     if data.startswith("rep_"):
         if data == "rep_ignore":
@@ -1138,6 +1282,8 @@ async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_
         return
 
     text = update.message.text.strip()
+    if text.startswith('/'):
+        return
     user = update.effective_user
     
     # Re-use parser logic (simplified for this handler since we need the match object too)
@@ -1344,7 +1490,7 @@ async def setup_bot_application():
                 unit = val[-1].lower()
                 v = int(val[:-1])
                 secs = v * 60 if unit == 'm' else v * 3600
-                application.job_queue.run_repeating(execute_announcement, interval=secs, first=10, chat_id=c_id, data=txt, name=f"ann_{ann_id}")
+                application.job_queue.run_repeating(execute_announcement, interval=secs, chat_id=c_id, data=txt, name=f"ann_{ann_id}")
             # --- ADD THIS BLOCK ---
             elif typ == "once":
                 # For 'once', we need to check if it's still valid or just run it on delay
@@ -1361,7 +1507,10 @@ async def setup_bot_application():
     application.add_handler(CommandHandler("unmute", unmute_user_command, filters=filters.ChatType.GROUPS)) 
     application.add_handler(CommandHandler("ban", ban_user, filters=filters.ChatType.GROUPS))
     application.add_handler(CommandHandler("unban", unban_user_command, filters=filters.ChatType.GROUPS)) 
-    application.add_handler(CommandHandler("warn", warn_user_command, filters=filters.ChatType.GROUPS))
+    # FIND THIS LINE:
+    # application.add_handler(CommandHandler("warn", warn_user_command, filters=filters.ChatType.GROUPS))
+    # REPLACE IT WITH THIS (Removes the Group filter):
+    application.add_handler(CommandHandler("warn", warn_user_command))
     application.add_handler(CommandHandler("set_strict_mode", set_strict_mode, filters=filters.ChatType.GROUPS)) 
     application.add_handler(CommandHandler("set_ml_check", set_ml_check, filters=filters.ChatType.GROUPS)) 
     application.add_handler(CommandHandler("set_reaction_mode", set_reaction_mode, filters=filters.ChatType.GROUPS)) 
@@ -1375,7 +1524,8 @@ async def setup_bot_application():
     application.add_handler(CommandHandler("del", delete_message_command))
     application.add_handler(CommandHandler("pin", pin_message_command))
 
-    application.add_handler(CallbackQueryHandler(button, pattern="^(done|cancel_warn:.*|unmute:.*|unban:.*|rep_.*)$")) 
+    # REPLACE WITH THIS:
+    application.add_handler(CallbackQueryHandler(button, pattern="^(done|ntf_sel_.*|cancel_warn:.*|unmute:.*|unban:.*|rep_.*)$")) 
     
     # --- HANDLER FOR PRIVATE REACTIONS ---
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, handle_private_reaction))
@@ -1419,10 +1569,24 @@ async def serve_app():
 async def run_bot_server():
     """Main function to setup bot and start the web server."""
     await setup_bot_application()
-    if WEBHOOK_URL: 
-        await setup_webhook()
+    
+    # 1. Define the server config
+    config = Config()
+    config.bind = [f"0.0.0.0:{PORT}"]
+    asgi_app = WsgiToAsgi(app)
+
+    # 2. Define a background task to set the webhook LATER
+    async def set_webhook_delayed():
+        await asyncio.sleep(3) # Wait 3 seconds for Hypercorn to start
+        if WEBHOOK_URL:
+            await setup_webhook()
+            
+    # 3. Start the background task
+    asyncio.create_task(set_webhook_delayed())
+
     try:
-        await serve_app()
+        # 4. Start the server (This blocks until the bot stops)
+        await serve(asgi_app, config)
     finally:
         logger.info("Shutting down application...")
         await application.stop()
