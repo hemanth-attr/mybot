@@ -635,13 +635,10 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     # --- 1. Admin Permission Check ---
-    # SEPARATE LOGIC: Private vs Group
     if chat.type == ChatType.PRIVATE:
-        # PRIVATE CHAT: Only allow System Admins (Bot Owners)
         if user.id not in SYSTEM_BOT_IDS:
             return 
     else:
-        # GROUP CHAT: Check actual admin permissions
         if not await is_admin(update, context):
             return 
 
@@ -654,33 +651,39 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_arg = context.args[0]
         reason = " ".join(context.args[1:]) if len(context.args) > 1 else "Violation of rules."
         
-        # Parse the link to get Chat ID and Message ID
         ids = _parse_link_identifiers(target_arg)
-        
         if not ids:
              await update.message.reply_text("⚠️ Invalid link. Use `/warn <link> <reason>`", parse_mode=ParseMode.MARKDOWN)
              return
 
         target_chat_id, target_msg_id = ids
         
+        # --- NEW FIX: Convert Username (@group) to ID (-100...) ---
+        # The DB needs a number, but the link might give a string.
+        if isinstance(target_chat_id, str):
+            try:
+                chat_obj = await context.bot.get_chat(target_chat_id)
+                target_chat_id = chat_obj.id
+            except Exception as e:
+                await update.message.reply_text(f"❌ Could not find chat ID for {target_chat_id}: {e}")
+                return
+        # -----------------------------------------------------------
+
         # --- A. Fetch User ID (Forward Trick) ---
         target_user = None
         try:
-            # Forward message to bot's private chat to read sender data
             dummy_msg = await context.bot.forward_message(
                 chat_id=update.effective_chat.id, 
                 from_chat_id=target_chat_id, 
                 message_id=target_msg_id
             )
             
-            # Extract User from the forwarded message
             if hasattr(dummy_msg, 'forward_origin') and dummy_msg.forward_origin:
                  if dummy_msg.forward_origin.type == 'user':
                      target_user = dummy_msg.forward_origin.sender_user
             elif dummy_msg.forward_from:
                  target_user = dummy_msg.forward_from
 
-            # Clean up (delete the forwarded copy)
             await dummy_msg.delete()
             
         except Exception as e:
@@ -701,15 +704,13 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⛔ **Error:** I cannot warn or mute other Admins.", parse_mode=ParseMode.MARKDOWN)
                 return
         except Exception:
-            pass # Continue if check fails (e.g. bot not in chat)
+            pass 
 
-        # --- C. Database & Formatting Logic (Matches Group Logic) ---
+        # --- C. Database & Formatting Logic ---
         try:
-            # 1. Add to Database
             warn_count, expiry_dt = await db.add_warning_async(target_chat_id, target_user_id)
             expiry_str = expiry_dt.strftime("%d/%m/%Y %H:%M")
             
-            # 2. Decide Action (Warn vs Mute)
             if warn_count <= 2:
                 caption = (
                     f"⚠️ **Warning Issued**\n"
@@ -719,7 +720,6 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{target_chat_id}:{target_user_id}")]]
             else:
-                # Exceeded limit -> Mute
                 until_date = datetime.now() + timedelta(days=1)
                 await context.bot.restrict_chat_member(
                     chat_id=target_chat_id, user_id=target_user_id,
@@ -734,7 +734,6 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{target_chat_id}:{target_user_id}")]]
 
-            # 3. Send formatted message to GROUP
             await context.bot.send_message(
                 chat_id=target_chat_id, 
                 text=caption, 
@@ -742,13 +741,11 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML
             )
             
-            # 4. Delete the bad message
             try:
                 await context.bot.delete_message(chat_id=target_chat_id, message_id=target_msg_id)
             except Exception:
-                pass # Message might already be deleted
+                pass 
             
-            # 5. Confirm to Admin
             await update.message.reply_text("✅ **Success:** Warning sent and message deleted.", parse_mode=ParseMode.MARKDOWN)
 
         except Exception as e:
@@ -762,7 +759,6 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     reason = "Manually warned by Admin"
     if context.args:
-        # Handle cases where args might start with ID or @mention
         if (context.args[0].isdigit() or context.args[0].startswith('@')):
              reason_args = context.args[1:]
         else:
@@ -775,11 +771,9 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Add to Database
         warn_count, expiry_dt = await db.add_warning_async(chat.id, target_id)
         expiry_str = expiry_dt.strftime("%d/%m/%Y %H:%M")
         
-        # Decide Action (Warn vs Mute)
         if warn_count <= 2:
             caption = (
                 f"⚠️ **Warning Issued**\n"
@@ -789,7 +783,6 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{chat.id}:{target_id}")]]
         else:
-            # Exceeded limit -> Mute
             until_date = datetime.now() + timedelta(days=1)
             await context.bot.restrict_chat_member(
                 chat_id=chat.id, user_id=target_id,
