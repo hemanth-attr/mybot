@@ -635,12 +635,15 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     # --- 1. Admin Permission Check ---
-    if not await is_admin(update, context):
-        # Exception: Allow System Admins to use command in Private Chat
-        if chat.type == ChatType.PRIVATE and user.id in SYSTEM_BOT_IDS:
-            pass
-        else:
-            return
+    # SEPARATE LOGIC: Private vs Group
+    if chat.type == ChatType.PRIVATE:
+        # PRIVATE CHAT: Only allow System Admins (Bot Owners)
+        if user.id not in SYSTEM_BOT_IDS:
+            return 
+    else:
+        # GROUP CHAT: Check actual admin permissions
+        if not await is_admin(update, context):
+            return 
 
     # --- 2. PRIVATE CHAT MODE (Remote Warn via Link) ---
     if chat.type == ChatType.PRIVATE:
@@ -654,45 +657,116 @@ async def warn_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Parse the link to get Chat ID and Message ID
         ids = _parse_link_identifiers(target_arg)
         
-        if ids:
-            target_chat_id, target_msg_id = ids
-            try:
-                # Step A: Reply to the bad message in the group with the warning
-                await context.bot.send_message(
-                    chat_id=target_chat_id,
-                    text=f"⚠️ <b>Admin Warning</b>\nReason: {html.escape(reason)}",
-                    reply_to_message_id=target_msg_id,
-                    parse_mode=ParseMode.HTML
-                )
-                
-                # Step B: Delete the bad message
-                await context.bot.delete_message(chat_id=target_chat_id, message_id=target_msg_id)
-                
-                await update.message.reply_text("✅ **Success:** Message deleted and warning sent to the group.")
-            except TelegramError as e:
-                await update.message.reply_text(f"❌ **Error:** {e}")
-            return
+        if not ids:
+             await update.message.reply_text("⚠️ Invalid link. Use `/warn <link> <reason>`", parse_mode=ParseMode.MARKDOWN)
+             return
+
+        target_chat_id, target_msg_id = ids
+        
+        # --- A. Fetch User ID (Forward Trick) ---
+        target_user = None
+        try:
+            # Forward message to bot's private chat to read sender data
+            dummy_msg = await context.bot.forward_message(
+                chat_id=update.effective_chat.id, 
+                from_chat_id=target_chat_id, 
+                message_id=target_msg_id
+            )
             
-        else:
-            await update.message.reply_text("⚠️ Invalid link. Use `/warn <link> <reason>`")
+            # Extract User from the forwarded message
+            if hasattr(dummy_msg, 'forward_origin') and dummy_msg.forward_origin:
+                 if dummy_msg.forward_origin.type == 'user':
+                     target_user = dummy_msg.forward_origin.sender_user
+            elif dummy_msg.forward_from:
+                 target_user = dummy_msg.forward_from
+
+            # Clean up (delete the forwarded copy)
+            await dummy_msg.delete()
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error fetching message details: {e}")
             return
 
-    # --- 3. GROUP CHAT MODE (Your Original Feature) ---
-    # This block runs ONLY in groups, preserving the DB counting and Muting logic.
-    
+        if not target_user:
+            await update.message.reply_text("❌ Could not determine the user (Forward Privacy might be enabled).")
+            return
+            
+        target_user_id = target_user.id
+        target_display = f"<a href='tg://user?id={target_user_id}'>{html.escape(target_user.first_name)}</a>"
+
+        # --- B. Admin Protection Check ---
+        try:
+            target_member = await context.bot.get_chat_member(target_chat_id, target_user_id)
+            if target_member.status in ['administrator', 'creator']:
+                await update.message.reply_text("⛔ **Error:** I cannot warn or mute other Admins.", parse_mode=ParseMode.MARKDOWN)
+                return
+        except Exception:
+            pass # Continue if check fails (e.g. bot not in chat)
+
+        # --- C. Database & Formatting Logic (Matches Group Logic) ---
+        try:
+            # 1. Add to Database
+            warn_count, expiry_dt = await db.add_warning_async(target_chat_id, target_user_id)
+            expiry_str = expiry_dt.strftime("%d/%m/%Y %H:%M")
+            
+            # 2. Decide Action (Warn vs Mute)
+            if warn_count <= 2:
+                caption = (
+                    f"⚠️ **Warning Issued**\n"
+                    f"• User: {target_display}\n"
+                    f"• Action: Warn ({warn_count}/3) ❕ until {expiry_str}.\n"
+                    f"• Reason: {html.escape(reason)}"
+                )
+                keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_warn:{target_chat_id}:{target_user_id}")]]
+            else:
+                # Exceeded limit -> Mute
+                until_date = datetime.now() + timedelta(days=1)
+                await context.bot.restrict_chat_member(
+                    chat_id=target_chat_id, user_id=target_user_id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=until_date
+                )
+                caption = (
+                    f"🔇 **User Muted**\n"
+                    f"• User: {target_display}\n"
+                    f"• Action: Muted ({warn_count}/3) 🔇 until {expiry_str}.\n"
+                    f"• Reason: {html.escape(reason)}"
+                )
+                keyboard = [[InlineKeyboardButton("✅ Unmute", callback_data=f"unmute:{target_chat_id}:{target_user_id}")]]
+
+            # 3. Send formatted message to GROUP
+            await context.bot.send_message(
+                chat_id=target_chat_id, 
+                text=caption, 
+                reply_markup=InlineKeyboardMarkup(keyboard), 
+                parse_mode=ParseMode.HTML
+            )
+            
+            # 4. Delete the bad message
+            try:
+                await context.bot.delete_message(chat_id=target_chat_id, message_id=target_msg_id)
+            except Exception:
+                pass # Message might already be deleted
+            
+            # 5. Confirm to Admin
+            await update.message.reply_text("✅ **Success:** Warning sent and message deleted.", parse_mode=ParseMode.MARKDOWN)
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Database/Permission Error: {e}", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # --- 3. GROUP CHAT MODE (Standard) ---
     target = await get_target_user_id(update, context)
     if not target: return
     target_id, target_display = target
     
     reason = "Manually warned by Admin"
     if context.args:
-        # If args exist, check if the first one was the user ID/Username (which get_target handled)
-        # If so, the reason starts at index 1. If it was a reply, reason starts at 0.
+        # Handle cases where args might start with ID or @mention
         if (context.args[0].isdigit() or context.args[0].startswith('@')):
              reason_args = context.args[1:]
         else:
              reason_args = context.args
-             
         if reason_args:
             reason = "Admin Warn: " + " ".join(reason_args)
 
