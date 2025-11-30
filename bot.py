@@ -520,14 +520,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/unban [user]`: Unban a user.\n"
         "• `/set_strict_mode [on/off]`: Toggle strict mode for new users.\n"
         "• `/set_ml_check [on/off]`: Toggle ML spam detection.\n"
-        "• `/set_reaction_mode [on/off]`: Toggle auto-reactions.\n"
         "• `/check_permissions`: Check bot's admin rights in this chat.\n"
-        "• `/replyto <link> <text>`: Reply to a message via link.\n"
-        "• `/react <link> <emoji>`: React to a message via link.\n"
-        "• `/unreact <link>`: Remove reactions from a message via link.\n"
-        "• `/edit <link> <text>`: Edit a bot's message via link.\n"
-        "• `/del <link>`: Delete a message via link.\n"
-        "• `/pin <link>`: Pin a message via link."
     )
     await update.effective_message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
