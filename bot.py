@@ -547,33 +547,101 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await msg.reply_text(response, parse_mode=ParseMode.MARKDOWN)
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target = await get_target_user_id(update, context)
-    if not target: return
-    user_id, user_display = target
-    chat_id = update.effective_chat.id
+    # 1. Identify who sent the command (The "Actor")
+    actor = update.effective_user
+    chat = update.effective_chat
     
-    # 1. Get Real Telegram Status
+    # 2. Check if the Actor is an Admin
+    # We use the existing helper function, but we need to handle the "reply" check manually below
+    admin_ids = await get_admin_ids(chat, context)
+    is_actor_admin = actor.id in admin_ids or actor.id in SYSTEM_BOT_IDS
+    
+    target_id = None
+    target_user_obj = None
+
+    # 3. Determine the Target
+    if is_actor_admin:
+        # ADMIN LOGIC:
+        # If Admin replies to someone, show THAT person's info.
+        # If Admin just types /info, show Admin's info.
+        target = await get_target_user_id(update, context)
+        if target:
+            target_id, _ = target # We ignore the display name from helper for a moment
+    else:
+        # MEMBER LOGIC:
+        # ALWAYS show their own info, even if they reply to someone.
+        target_id = actor.id
+
+    # Fallback if logic failed (shouldn't happen, but safe to have)
+    if not target_id:
+        target_id = actor.id
+
+    # 4. Get Target Display Name & Status
     try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        status = member.status.title() # Returns "Administrator", "Creator", "Member"
+        # Get latest chat member info
+        member = await context.bot.get_chat_member(chat.id, target_id)
+        status = member.status.title() # "Administrator", "Member", "Creator"
+        user_display = f"<a href='tg://user?id={target_id}'>{html.escape(member.user.first_name)}</a>"
     except Exception: 
         status = "Member"
+        user_display = f"User <code>{target_id}</code>"
 
-    # 2. Get DB Stats
-    data, rep_points = await db.get_user_rank_data(chat_id, user_id)
+    # 5. Get DB Stats
+    data, rep_points = await db.get_user_rank_data(chat.id, target_id)
     total_msgs = data['total_messages'] if data else 0
     rank = get_rank_string(total_msgs)
     
     text = (
         f"👤 <b>User Info:</b> {user_display}\n"
-        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+        f"🆔 <b>ID:</b> <code>{target_id}</code>\n"
         f"🛡 <b>Status:</b> {status}\n"
         f"📊 <b>Messages:</b> {total_msgs}\n"
         f"🏆 <b>Rank:</b> {rank}\n"
         f"⭐ <b>Reputation:</b> {rep_points} points"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+async def rscore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Security Check: Admins Only
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    # Check if user is Admin OR System Bot Owner
+    is_admin_user = await is_admin(update, context) or user.id in SYSTEM_BOT_IDS
+    if not is_admin_user:
+        return # Ignore non-admins silently
 
+    # 2. Identify Target User
+    target = await get_target_user_id(update, context)
+    if not target:
+        return
+    target_id, target_display = target
+
+    # 3. Parse the Score argument
+    # If replying: /rscore 50 -> args[0] is 50
+    # If ID:       /rscore 12345 50 -> args[1] is 50
+    score = 0
+    try:
+        if update.effective_message.reply_to_message:
+            score = int(context.args[0])
+        else:
+            score = int(context.args[1])
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: Reply with `/rscore <1-100>` or use `/rscore <ID> <1-100>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 4. Validate Range (1 to 100)
+    if not (1 <= score <= 100):
+        await update.message.reply_text("❌ Score must be between **1** and **100**.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 5. Add to Database
+    await db.add_reputation(target_id, score)
+    
+    # 6. Success Message
+    await update.message.reply_text(
+        f"✅ Added **+{score}** Rep to {target_display}!\nAction by: {user.first_name}",
+        parse_mode=ParseMode.HTML
+    )
 async def toprep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = await db.get_top_reputation(10)
     text = "\n".join([f"{i+1}. ID {r['user_id']} - {r['points']} pts" for i, r in enumerate(rows)]) or "No Data"
@@ -1559,9 +1627,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not user or not chat: return
     
-    if user.id in SYSTEM_BOT_IDS: return
-        
-    admin_ids = await get_admin_ids(chat, context)
     # === NEW: Activity & Reputation ===
     if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         await db.increment_total_messages(chat.id, user.id)
@@ -1572,7 +1637,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if ref.id != user.id and not ref.is_bot:
                     await db.add_reputation(ref.id, 1)
                     await update.message.reply_text(f"⭐ +1 Rep to {ref.first_name}!")
-    # ==================================
+ 
+    
+    if user.id in SYSTEM_BOT_IDS: return
+        
+    admin_ids = await get_admin_ids(chat, context)
+
+   # ==================================
     # Check for Admins
     if user.id in admin_ids:
         return # Admins are ignored for spam checks
@@ -1690,6 +1761,7 @@ async def setup_bot_application():
     application.add_handler(CommandHandler("ntf", ntf_command))
     application.add_handler(CommandHandler("id", id_command))
     application.add_handler(CommandHandler("info", info_command))
+    application.add_handler(CommandHandler("rscore", rscore_command))
     application.add_handler(CommandHandler("toprep", toprep_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("addfeed", add_feed_command))
