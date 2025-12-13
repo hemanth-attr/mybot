@@ -25,7 +25,7 @@ from typing import cast, Any, Optional
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from asgiref.wsgi import WsgiToAsgi
-
+import feedparser
 # Import our database module
 import database as db
 
@@ -102,8 +102,37 @@ def _load_ml_model_sync(vectorizer_path, model_path):
     model = joblib.load(model_path)
     return vectorizer, model
 
-# ================= Advanced Behavioral Analysis =================
+# ================= Advanced Behavioral Analysis/ Global Functions =================
+def get_rank_string(msg_count: int) -> str:
+    if msg_count < 10: return "Newbie 👶"
+    if msg_count < 50: return "Member 👤"
+    if msg_count < 100: return "Pro 💠"
+    if msg_count < 500: return "Expert 🔥"
+    if msg_count < 1000: return "Master 🧙‍♂️"
+    return "Legend 👑"
 
+async def check_rss_feeds(context: ContextTypes.DEFAULT_TYPE):
+    feeds = await db.get_rss_feeds()
+    for feed in feeds:
+        try:
+            # --- FIX: Run feedparser in a separate thread to prevent bot lagging ---
+            # This prevents the bot from "freezing" while downloading the feed
+            d = await asyncio.to_thread(feedparser.parse, feed['feed_url'])
+            
+            if not d.entries: continue
+            entry = d.entries[0]
+            entry_id = entry.get('id', entry.get('link'))
+            
+            if feed['last_entry_id'] != entry_id:
+                # Use HTML to prevent crashes with special symbols in titles
+                title = html.escape(entry.title)
+                link = entry.link
+                msg = f"📰 <b>New Post!</b>\n\n<b>{title}</b>\n\n👇 Read here:\n{link}"
+                
+                await context.bot.send_message(chat_id=feed['target_chat_id'], text=msg, parse_mode=ParseMode.HTML)
+                await db.update_rss_last_entry(feed['id'], entry_id)
+        except Exception as e:
+            logger.error(f"RSS Error: {e}")
 async def update_user_activity(chat_id: int, user_id: int):
     """Updates in-memory flood cache and persistent DB new-user count."""
     user_id_str = str(user_id)
@@ -504,7 +533,69 @@ async def schedule_announcement(target_chat_id, sub_cmd, time_val, msg_text, con
             await reply_msg.reply_text(err_text)
         return err_text
 # ================= Admin Command Handlers =================
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    response = f"🆔 **Chat ID:** `{chat.id}`"
+    
+    if msg.reply_to_message:
+        reply = msg.reply_to_message
+        from_user = reply.from_user
+        response += f"\n👤 **Replied User ID:** `{from_user.id}`"
+        if reply.forward_origin and hasattr(reply.forward_origin, 'chat'):
+             response += f"\n📢 **Channel ID:** `{reply.forward_origin.chat.id}`"
+    
+    await msg.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = await get_target_user_id(update, context)
+    if not target: return
+    user_id, user_display = target
+    chat_id = update.effective_chat.id
+    
+    # 1. Get Real Telegram Status
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        status = member.status.title() # Returns "Administrator", "Creator", "Member"
+    except Exception: 
+        status = "Member"
 
+    # 2. Get DB Stats
+    data, rep_points = await db.get_user_rank_data(chat_id, user_id)
+    total_msgs = data['total_messages'] if data else 0
+    rank = get_rank_string(total_msgs)
+    
+    text = (
+        f"👤 <b>User Info:</b> {user_display}\n"
+        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+        f"🛡 <b>Status:</b> {status}\n"
+        f"📊 <b>Messages:</b> {total_msgs}\n"
+        f"🏆 <b>Rank:</b> {rank}\n"
+        f"⭐ <b>Reputation:</b> {rep_points} points"
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+async def toprep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = await db.get_top_reputation(10)
+    text = "\n".join([f"{i+1}. ID {r['user_id']} - {r['points']} pts" for i, r in enumerate(rows)]) or "No Data"
+    await update.message.reply_text(f"🏆 **Leaderboard**\n{text}", parse_mode=ParseMode.MARKDOWN)
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in SYSTEM_BOT_IDS: return
+    users = await db.get_all_bot_users()
+    await update.message.reply_text(f"🚀 Sending to {len(users)} users...")
+    for u in users:
+        try: await context.bot.send_message(u['user_id'], " ".join(context.args))
+        except: pass
+
+async def add_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args: return
+    await db.add_rss_feed(context.args[0], update.effective_chat.id)
+    await update.message.reply_text("✅ Feed added to THIS chat.")
+
+async def remove_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args: return
+    await db.remove_rss_feed(context.args[0], update.effective_chat.id)
+    await update.message.reply_text("🗑 Feed removed.")
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays help information about the bot's commands."""
     help_text = (
@@ -985,7 +1076,10 @@ async def periodic_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Starts the file-gating process."""
     if not update.message: return
+
     if update.effective_chat.type == ChatType.PRIVATE:
+        # Log user for broadcast AND send join message
+        await db.log_private_user(update.effective_user.id)
         await send_join_message(update, context)
     else:
         await update.message.reply_text("Welcome! I am an anti-spam bot. Use /help to see my commands.")
@@ -1468,7 +1562,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id in SYSTEM_BOT_IDS: return
         
     admin_ids = await get_admin_ids(chat, context)
-    
+    # === NEW: Activity & Reputation ===
+    if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+        await db.increment_total_messages(chat.id, user.id)
+        if update.message.reply_to_message:
+            txt = (update.message.text or "").lower()
+            if "+rep" in txt or "thanks" in txt:
+                ref = update.message.reply_to_message.from_user
+                if ref.id != user.id and not ref.is_bot:
+                    await db.add_reputation(ref.id, 1)
+                    await update.message.reply_text(f"⭐ +1 Rep to {ref.first_name}!")
+    # ==================================
     # Check for Admins
     if user.id in admin_ids:
         return # Admins are ignored for spam checks
@@ -1584,6 +1688,13 @@ async def setup_bot_application():
     # NEW HANDLERS
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("ntf", ntf_command))
+    application.add_handler(CommandHandler("id", id_command))
+    application.add_handler(CommandHandler("info", info_command))
+    application.add_handler(CommandHandler("toprep", toprep_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("addfeed", add_feed_command))
+    application.add_handler(CommandHandler("removefeed", remove_feed_command))
+    application.job_queue.run_repeating(check_rss_feeds, interval=1800, first=60)
     
     # LOAD SAVED SCHEDULES
     rows = await db.get_all_announcements()
