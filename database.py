@@ -352,3 +352,22 @@ async def get_all_bot_users():
     if not pool: return []
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT user_id FROM bot_users")
+# ================= ADMIN SETTERS (Add to bottom) =================
+
+async def set_message_count(chat_id: int, user_id: int, count: int):
+    """Manually sets the message count for a user in a specific group."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_activity (chat_id, user_id, total_messages) VALUES ($1, $2, $3)
+            ON CONFLICT (chat_id, user_id) DO UPDATE SET total_messages = $3
+        """, chat_id, user_id, count)
+
+async def set_reputation(user_id: int, points: int):
+    """Manually sets the reputation points for a user."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO reputation (user_id, points) VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET points = $2
+        """, user_id, points)
