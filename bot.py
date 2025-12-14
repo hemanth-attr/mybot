@@ -646,68 +646,138 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 async def mcount_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Strict Check: Private Chat & System Admin
-    if update.effective_chat.type != ChatType.PRIVATE: return
-    if update.effective_user.id not in SYSTEM_BOT_IDS: return
+    user = update.effective_user
+    chat = update.effective_chat
+    msg = update.effective_message
 
-    # 2. Parse Args: /mcount <link> <count>
-    if len(context.args) < 2:
-        await update.message.reply_text("⚠️ Usage: `/mcount <link> <count>`", parse_mode=ParseMode.MARKDOWN)
-        return
+    # 1. PERMISSION CHECK: System Admin OR Group Admin
+    if user.id not in SYSTEM_BOT_IDS:
+        # If not a System Admin, they MUST be a Group Admin to proceed
+        if not await is_admin(update, context):
+            return
 
-    link = context.args[0]
-    try:
-        new_count = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("❌ Count must be a number.")
-        return
+    target_chat_id = None
+    target_user_id = None
+    target_name = "User"
+    new_count = 0
 
-    # 3. Get User from Link
-    chat_id, user_obj, error = await get_user_from_link(context, link)
-    if error:
-        await update.message.reply_text(f"❌ Failed: {error}")
-        return
-
-    # 4. Update DB
-    await db.set_message_count(chat_id, user_obj.id, new_count)
+    # 2. PARSE ARGUMENTS (Hybrid: Reply or Link)
     
-    await update.message.reply_text(
+    # CASE A: Reply to a Message (Easiest for Groups)
+    if msg.reply_to_message:
+        try:
+            new_count = int(context.args[0])
+        except (IndexError, ValueError):
+            await msg.reply_text("❌ Usage (Reply): `/mcount <number>`", parse_mode=ParseMode.MARKDOWN)
+            return
+            
+        target_chat_id = chat.id
+        target_user = msg.reply_to_message.from_user
+        target_user_id = target_user.id
+        target_name = target_user.first_name
+
+    # CASE B: Use a Link (For Private Chat or specific targeting)
+    elif len(context.args) >= 2:
+        link = context.args[0]
+        try:
+            new_count = int(context.args[1])
+        except ValueError:
+            await msg.reply_text("❌ Count must be a number.")
+            return
+
+        # Use helper to resolve link
+        cid, u_obj, error = await get_user_from_link(context, link)
+        if error:
+            await msg.reply_text(f"❌ Failed: {error}")
+            return
+            
+        target_chat_id = cid
+        target_user_id = u_obj.id
+        target_name = u_obj.first_name
+
+    # Handle No Args / No Reply
+    else:
+        await msg.reply_text(
+            "⚠️ **Usage Options:**\n"
+            "1. Reply to user: `/mcount <number>`\n"
+            "2. By Link: `/mcount <link> <number>`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # 3. UPDATE DATABASE
+    # Note: Ensure set_message_count exists in your database.py
+    await db.set_message_count(target_chat_id, target_user_id, new_count)
+    
+    await msg.reply_text(
         f"✅ **Rank Updated**\n"
-        f"👤 User: {user_obj.mention_html()} (`{user_obj.id}`)\n"
-        f"📂 Group ID: `{chat_id}`\n"
+        f"👤 User: <a href='tg://user?id={target_user_id}'>{html.escape(target_name)}</a>\n"
         f"📊 New Count: {new_count}",
         parse_mode=ParseMode.HTML
     )
 
 async def rscore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Strict Check: Private Chat & System Admin
-    if update.effective_chat.type != ChatType.PRIVATE: return
-    if update.effective_user.id not in SYSTEM_BOT_IDS: return
+    user = update.effective_user
+    msg = update.effective_message
 
-    # 2. Parse Args: /rscore <link> <score>
-    if len(context.args) < 2:
-        await update.message.reply_text("⚠️ Usage: `/rscore <link> <score>`", parse_mode=ParseMode.MARKDOWN)
+    # 1. PERMISSION CHECK: System Admin OR Group Admin
+    if user.id not in SYSTEM_BOT_IDS:
+        if not await is_admin(update, context):
+            return
+
+    target_user_id = None
+    target_name = "User"
+    new_score = 0
+
+    # 2. PARSE ARGUMENTS (Hybrid: Reply or Link)
+    
+    # CASE A: Reply
+    if msg.reply_to_message:
+        try:
+            new_score = int(context.args[0])
+        except (IndexError, ValueError):
+            await msg.reply_text("❌ Usage (Reply): `/rscore <number>`", parse_mode=ParseMode.MARKDOWN)
+            return
+            
+        target_user = msg.reply_to_message.from_user
+        target_user_id = target_user.id
+        target_name = target_user.first_name
+
+    # CASE B: Link
+    elif len(context.args) >= 2:
+        link = context.args[0]
+        try:
+            new_score = int(context.args[1])
+        except ValueError:
+            await msg.reply_text("❌ Score must be a number.")
+            return
+
+        # Use helper
+        _, u_obj, error = await get_user_from_link(context, link)
+        if error:
+            await msg.reply_text(f"❌ Failed: {error}")
+            return
+            
+        target_user_id = u_obj.id
+        target_name = u_obj.first_name
+
+    # Handle Invalid Input
+    else:
+        await msg.reply_text(
+            "⚠️ **Usage Options:**\n"
+            "1. Reply to user: `/rscore <number>`\n"
+            "2. By Link: `/rscore <link> <number>`",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
-    link = context.args[0]
-    try:
-        new_score = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("❌ Score must be a number.")
-        return
+    # 3. UPDATE DATABASE
+    # Note: Ensure set_reputation exists in your database.py
+    await db.set_reputation(target_user_id, new_score)
 
-    # 3. Get User from Link
-    _, user_obj, error = await get_user_from_link(context, link)
-    if error:
-        await update.message.reply_text(f"❌ Failed: {error}")
-        return
-
-    # 4. Update DB
-    await db.set_reputation(user_obj.id, new_score)
-
-    await update.message.reply_text(
+    await msg.reply_text(
         f"✅ **Reputation Set**\n"
-        f"👤 User: {user_obj.mention_html()} (`{user_obj.id}`)\n"
+        f"👤 User: <a href='tg://user?id={target_user_id}'>{html.escape(target_name)}</a>\n"
         f"⭐ New Score: {new_score}",
         parse_mode=ParseMode.HTML
     )
