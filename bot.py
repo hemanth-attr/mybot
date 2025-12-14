@@ -540,7 +540,6 @@ async def get_user_from_link(context: ContextTypes.DEFAULT_TYPE, link: str):
     
     chat_id, message_id = ids
     
-    # Handle Username links (@group) by converting to ID
     if isinstance(chat_id, str):
         try:
             chat_obj = await context.bot.get_chat(chat_id)
@@ -548,7 +547,7 @@ async def get_user_from_link(context: ContextTypes.DEFAULT_TYPE, link: str):
         except Exception: return None, None, "Could not resolve Chat Username"
 
     try:
-        # Forward message to SELF (Private) to read the sender
+        # Forward to Private Chat
         dummy = await context.bot.forward_message(
             chat_id=context._chat_id, 
             from_chat_id=chat_id, 
@@ -556,17 +555,28 @@ async def get_user_from_link(context: ContextTypes.DEFAULT_TYPE, link: str):
         )
         
         target_user = None
-        if dummy.forward_origin and dummy.forward_origin.type == 'user':
-             target_user = dummy.forward_origin.sender_user
-        elif dummy.forward_from:
-             target_user = dummy.forward_from
-        elif dummy.from_user:
+        
+        # FIX: Check 'forward_origin' ONLY. Do not touch 'forward_from'.
+        origin = getattr(dummy, 'forward_origin', None)
+        
+        if origin:
+            if origin.type == 'user':
+                target_user = origin.sender_user
+            elif origin.type == 'hidden_user':
+                await dummy.delete()
+                return None, None, "❌ User has Forward Privacy enabled (Hidden)."
+            elif origin.type == 'channel':
+                await dummy.delete()
+                return None, None, "❌ This is a Channel post, not a User message."
+        
+        # Fallback for very old messages or weird edge cases
+        if not target_user:
              target_user = dummy.from_user
 
         await dummy.delete() 
         
         if not target_user:
-            return None, None, "User is hidden or has privacy enabled."
+            return None, None, "Could not determine user."
             
         return chat_id, target_user, None
         
