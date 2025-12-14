@@ -352,7 +352,7 @@ async def get_all_bot_users():
     if not pool: return []
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT user_id FROM bot_users")
-# ================= ADMIN SETTERS (Add to bottom) =================
+# ================= ADMIN SETTERS (bottom) =================
 
 async def set_message_count(chat_id: int, user_id: int, count: int):
     """Manually sets the message count for a user in a specific group."""
