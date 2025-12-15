@@ -85,6 +85,7 @@ FLOOD_MESSAGE_COUNT = 3
 ML_MODEL = None
 TFIDF_VECTORIZER = None
 user_behavior = {} # In-memory flood control cache
+rep_cooldowns = {}
 # Add this here:
 URL_FINDER_REGEX = re.compile(r'((?:https?://|www\.|t\.me/)\S+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\S*)', re.I)
 
@@ -110,6 +111,13 @@ def get_rank_string(msg_count: int) -> str:
     if msg_count < 500: return "Expert 🔥"
     if msg_count < 1000: return "Master 🧙‍♂️"
     return "Legend 👑"
+def get_rep_title(points: int) -> str:
+    """Returns a title based on Reputation Score."""
+    if points < 5: return "Lite"
+    if points < 25: return "Pro"
+    if points < 50: return "Expert"
+    if points < 100: return "Master"
+    return "Legend"
 
 async def check_rss_feeds(context: ContextTypes.DEFAULT_TYPE):
     feeds = await db.get_rss_feeds()
@@ -608,15 +616,11 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_id = None
 
     # 3. Determine the Target
-    # FIX: Only call the helper if the Admin ACTUALLY provided input (Reply or ID)
-    # This prevents the "Usage:" warning when sending just /info
     if is_actor_admin and (msg.reply_to_message or context.args):
         target = await get_target_user_id(update, context)
         if target:
             target_id, _ = target 
         else:
-            # If get_target_user_id failed, it already sent the "Usage:" message.
-            # We MUST stop here to avoid sending the second message.
             return
     else:
         # If no reply/args (or not admin), default to Self
@@ -626,6 +630,10 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         member = await context.bot.get_chat_member(chat.id, target_id)
         status = member.status.title() 
+        # --- FIX 1: Force "Restricted" to show as "Member" ---
+        if status == "Restricted":
+            status = "Member"
+            
         user_display = f"<a href='tg://user?id={target_id}'>{html.escape(member.user.first_name)}</a>"
     except Exception: 
         status = "Member"
@@ -634,14 +642,32 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 5. Get DB Stats
     data, rep_points = await db.get_user_rank_data(chat.id, target_id)
     total_msgs = data['total_messages'] if data else 0
-    rank = get_rank_string(total_msgs)
+    
+    # --- FIX 2: Calculate Rank "No. X (Title)" ---
+    # A. Get the Title (Legend, Newbie, etc.)
+    rep_title = get_rep_title(rep_points)
+    
+    # B. Calculate the Position (No. 1, No. 5, etc.)
+    # We fetch the top 1000 users to check where this user ranks.
+    # (If you have a huge database, you might need a specific DB function for this later)
+    rank_pos = "Unranked"
+    try:
+        top_users = await db.get_top_reputation(1000)
+        for i, row in enumerate(top_users, start=1):
+            if row['user_id'] == target_id:
+                rank_pos = f"No. {i}"
+                break
+    except Exception:
+        pass
+
+    final_rank_string = f"{rank_pos} ({rep_title})"
     
     text = (
         f"👤 <b>User Info:</b> {user_display}\n"
         f"🆔 <b>ID:</b> <code>{target_id}</code>\n"
         f"🛡 <b>Status:</b> {status}\n"
         f"📊 <b>Messages:</b> {total_msgs}\n"
-        f"🏆 <b>Rank:</b> {rank}\n"
+        f"🏆 <b>Rank:</b> {final_rank_string}\n"
         f"⭐ <b>Reputation:</b> {rep_points} points"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -1279,6 +1305,13 @@ async def periodic_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
             
     if cleaned_users > 0:
         logger.info(f"Cleaned {cleaned_users} inactive users from in-memory flood cache.")
+    # 3. Clean Reputation Cooldowns (ADD THIS BLOCK)
+    # Remove entries older than 1 hour to save memory
+    expired_rep_keys = [k for k, t in rep_cooldowns.items() if t < one_hour_ago]
+    for k in expired_rep_keys:
+        del rep_cooldowns[k]
+        
+    logger.info(f"Cleaned cleanup job. Removed {len(expired_rep_keys)} old rep cooldowns.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Starts the file-gating process."""
@@ -1765,15 +1798,43 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     entities = update.message.entities or update.message.caption_entities
 
     if not user or not chat: return
-    
     # === NEW: Activity & Reputation ===
     if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         await db.increment_total_messages(chat.id, user.id)
+        
+        # Check for Reply + Keyword
         if update.message.reply_to_message:
             txt = (update.message.text or "").lower()
-            if "+rep" in txt or "thanks" in txt:
+            
+            # Simple check to ensure they aren't thanking themselves
+            if ("+rep" in txt or "thanks" in txt or "thx" in txt):
                 ref = update.message.reply_to_message.from_user
+                
+                # Prevent Self-Rep and Bot-Rep
                 if ref.id != user.id and not ref.is_bot:
+                    
+                    # --- COOLDOWN LOGIC START ---
+                    # 1. Define Key: (Who gave it, Who received it)
+                    cooldown_key = (user.id, ref.id)
+                    current_time = time.time()
+                    
+                    # 2. Check if they exist in cooldown dict
+                    last_given = rep_cooldowns.get(cooldown_key, 0)
+                    
+                    # 3. Set limit (e.g., 300 seconds = 5 minutes)
+                    if current_time - last_given < 300:
+                        # Optional: Reply to tell them to wait (or just silently return)
+                        await update.message.reply_text(
+                            "⏳ <b>Cooldown:</b> You can only give reputation to the same user once every 5 minutes.",
+                            parse_mode=ParseMode.HTML
+                        )
+                        return # <--- STOP HERE
+                    
+                    # 4. Update the timestamp
+                    rep_cooldowns[cooldown_key] = current_time
+                    # --- COOLDOWN LOGIC END ---
+
+                    # 5. Add Reputation in DB
                     await db.add_reputation(ref.id, 1)
                     await update.message.reply_text(f"⭐ +1 Rep to {ref.first_name}!")
  
