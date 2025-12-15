@@ -808,9 +808,51 @@ async def rscore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 async def toprep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Get Top 10 Users by Reputation
     rows = await db.get_top_reputation(10)
-    text = "\n".join([f"{i+1}. ID {r['user_id']} - {r['points']} pts" for i, r in enumerate(rows)]) or "No Data"
-    await update.message.reply_text(f"🏆 **Leaderboard**\n{text}", parse_mode=ParseMode.MARKDOWN)
+    
+    if not rows:
+        await update.effective_message.reply_text("📉 No reputation data yet.")
+        return
+
+    chat = update.effective_chat
+    text = "🏆 <b>Top Reputation Leaderboard</b>\n━━━━━━━━━━━━━━━━━━\n"
+
+    # 2. Loop through users
+    for index, row in enumerate(rows, start=1):
+        user_id = row['user_id']
+        points = row['points']
+        
+        # Get Title based on Points (Legend, Master, etc.)
+        title = get_rep_title(points)
+
+        # Get Name
+        try:
+            member = await context.bot.get_chat_member(chat.id, user_id)
+            name = html.escape(member.user.first_name)
+        except Exception:
+            name = "Unknown"
+
+        # specific icons for Top 3
+        if index == 1:
+            icon = "🥇"
+        elif index == 2:
+            icon = "🥈"
+        elif index == 3:
+            icon = "🥉"
+        else:
+            icon = "▫️"
+
+        # 3. Format: 🥇 No. 1 (Legend) Name — 150 pts
+        text += (
+            f"{icon} <b>No. {index} ({title})</b> "
+            f"<a href='tg://user?id={user_id}'>{name}</a> — "
+            f"<code>{points} pts</code>\n"
+        )
+
+    text += "\n<i>Reply with '+rep' or 'Thanks' to thank others!</i>"
+    
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in SYSTEM_BOT_IDS: return
