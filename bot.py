@@ -40,7 +40,7 @@ CHANNEL_DATA = {
     -1002810504524: "https://t.me/Plus_UI_Official"
 }
 CHANNELS = list(CHANNEL_DATA.keys())
-JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
+JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.jpg"
 FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-UI-3.7.0-Updated.zip"
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
