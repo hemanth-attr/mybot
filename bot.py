@@ -41,7 +41,7 @@ CHANNEL_DATA = {
 }
 CHANNELS = list(CHANNEL_DATA.keys())
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.png"
-FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-Ui-3.7.0-Updated.zip"
+FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/files/Plus-UI-3.7.0-Updated.zip"
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
 
