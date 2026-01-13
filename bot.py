@@ -1443,7 +1443,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "done":
         user_id = query.from_user.id
         if await is_member_all(context, user_id):
-          await query.answer(text="Verifying...", show_alert=False)
+            await query.answer(text="Verifying...", show_alert=False)
             if query.message:
                 try: await query.message.delete()
                 except TelegramError as e: logger.warning(f"Failed to delete join message: {e}")
