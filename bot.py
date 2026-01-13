@@ -41,7 +41,7 @@ CHANNEL_DATA = {
 }
 CHANNELS = list(CHANNEL_DATA.keys())
 JOIN_IMAGE = "https://raw.githubusercontent.com/hemanth-attr/mybot/main/thumbnail.jpg"
-FILE_PATH = "https://github.com/hemanth-attr/mybot/raw/main/files/Plus-UI-3.7.0-Updated.zip"
+FILE_PATH = "BQACAgUAAxkBAAFAo3VpZkVSwU9O81OaH3vjXlOTs0fI5wAC7BoAAm7vMVcAAXULiHqDA0E4BA"
 STICKER_ID = "CAACAgUAAxkBAAE7GgABaMbdL0TUWT9EogNP92aPwhOpDHwAAkwXAAKAt9lUs_YoJCwR4mA2BA"
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -844,11 +844,14 @@ async def toprep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             icon = "▫️"
 
         # 3. Format: 🥇 No. 1 (Legend) Name — 150 pts
-        text += (
-            f"{icon} <b>No. {index} ({title})</b> "
-            f"<a href='tg://user?id={user_id}'>{name}</a> — "
-            f"<code>{points} pts</code>\n"
-        )
+
+        
+        if index <= 5:
+            user_display = f"<a href='tg://user?id={user_id}'>{name}</a>"
+        else:
+            user_display = name
+
+        text += f"{icon} <b>No. {index} ({title})</b> {user_display} — <code>{points} pts</code>\n"
 
     text += "\n<i>Reply with '+rep' or 'Thanks' to thank others!</i>"
     
@@ -1284,7 +1287,7 @@ async def is_member_all(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> boo
     for ch in CHANNELS:
         try:
             member = await bot.get_chat_member(ch, user_id) 
-            if member.status not in ["member", "administrator", "creator"]:
+            if member.status not in ["member", "administrator", "creator", "restricted"]:
                 return False
         except TelegramError as e: 
             logger.error(f"Error checking {ch} for user {user_id}: {e}")
@@ -1440,6 +1443,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "done":
         user_id = query.from_user.id
         if await is_member_all(context, user_id):
+          await query.answer(text="Verifying...", show_alert=False)
             if query.message:
                 try: await query.message.delete()
                 except TelegramError as e: logger.warning(f"Failed to delete join message: {e}")
@@ -1774,6 +1778,10 @@ async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_
     match = re.search(link_pattern, text)
 
     if not match:
+        # User sent regular text like "hi" or "give file"
+        # We redirect them to the join/verification process
+        await db.log_private_user(user.id)
+        await send_join_message(update, context)
         return
 
     # Extract Chat ID
@@ -1878,7 +1886,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     # 5. Add Reputation in DB
                     await db.add_reputation(ref.id, 1)
-                    await update.message.reply_text(f"⭐ +1 Rep to {ref.first_name}!")
+                    #await update.message.reply_text(f"⭐ +1 Rep to {ref.first_name}!")
  
     
     if user.id in SYSTEM_BOT_IDS: return
