@@ -12,7 +12,7 @@ from unidecode import unidecode
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ChatPermissions, Bot, Message, MessageEntity, User, ChatMember,
-    MessageOriginChannel, ReactionTypeEmoji, Chat
+    MessageOriginChannel, MessageOriginChat, MessageOriginHiddenUser, ReactionTypeEmoji, Chat
 )
 from telegram.constants import ParseMode, ChatType, MessageEntityType
 from telegram.ext import (
@@ -170,7 +170,7 @@ async def is_first_message_critical(chat_id: int, user_id: int, strict_mode_enab
 
 # ================= Spam Detection Functions =================
 
-async def rule_check(message_text: str, message_entities: list[MessageEntity] | None, user_id: int, chat_id: int) -> tuple[bool, str | None]:
+async def rule_check(message: Message, message_text: str, message_entities: list[MessageEntity] | None, user_id: int, chat_id: int) -> tuple[bool, str | None]:
     
     settings = await db.get_chat_settings(chat_id)
     strict_mode_on = settings.get("strict_mode", False)
@@ -179,7 +179,25 @@ async def rule_check(message_text: str, message_entities: list[MessageEntity] | 
     
     normalized_text = unidecode(message_text)
     text_lower = normalized_text.lower()
-    
+
+    # --- RULE: Block Forwards from Channels/Groups (Zero API Calls) ---
+    if message.forward_origin:
+        # Block forwards from Channels
+        if isinstance(message.forward_origin, MessageOriginChannel):
+            return True, "forwarded a message from a Channel"
+        
+        
+    # --- RULE: Check "Hidden" Links (Text Links) ---
+    if message_entities:
+        for entity in message_entities:
+            # Check for clickable text links (e.g. "FREEDOM" linking to a channel)
+            if entity.type == MessageEntityType.TEXT_LINK and entity.url:
+                if "t.me/" in entity.url.lower() or "telegram.me/" in entity.url.lower():
+                    return True, "sent a hidden Telegram channel link"
+                # If strict mode is ON, block ALL hidden links for new users
+                if BLOCK_ALL_URLS or is_critical_message:
+                    return True, "sent a hidden link (not allowed)"
+
     # Rule 1: Always block t.me links
     if "t.me/" in text_lower or "telegram.me/" in text_lower:
         return True, "Promotion is not allowed here!"
@@ -206,11 +224,6 @@ async def rule_check(message_text: str, message_entities: list[MessageEntity] | 
             except Exception:
                 return True, "has sent a malformed URL"
 
-    # Rule 2.5: Block @mentions for new users in strict mode
-    if is_critical_message and message_entities:
-        for entity in message_entities:
-            if entity.type == MessageEntityType.MENTION:
-                return True, "has sent a @mention (not allowed for new users)"
 
     # Rule 3: Excessive emojis
     if sum(c in SPAM_EMOJIS for c in message_text) > 5:
@@ -230,6 +243,26 @@ async def rule_check(message_text: str, message_entities: list[MessageEntity] | 
     if is_flood_spam(user_id):
         return True, "is flooding the chat"
 
+    return False, None
+
+# Updated is_spam now accepts 'message' and passes it to rule_check
+async def is_spam(message: Message, message_text: str, message_entities: list[MessageEntity] | None, user_id: int, chat_id: int) -> tuple[bool, str | None]:
+    """Hybrid spam detection combining rules and ML."""
+    if not message_text:
+        return False, None
+
+    # PASS message HERE
+    is_rule_spam, reason = await rule_check(message, message_text, message_entities, user_id, chat_id)
+    if is_rule_spam:
+        return True, reason
+
+    if await ml_check(message_text, chat_id):
+        settings = await db.get_chat_settings(chat_id)
+        is_critical = await is_first_message_critical(chat_id, user_id, settings.get("strict_mode", False))
+        if is_critical:
+              return True, "sent a spam message (ML/First Message Flag)"
+        return True, "sent a spam message (ML Model)"
+        
     return False, None
 
 async def ml_check(message_text: str, chat_id: int) -> bool:
@@ -1446,13 +1479,29 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(text="Verifying...", show_alert=False)
             if query.message:
                 try: await query.message.delete()
-                except TelegramError as e: logger.warning(f"Failed to delete join message: {e}")
+                except TelegramError: pass
+            
             chat_id = user_id 
-            await context.bot.send_sticker(chat_id=chat_id, sticker=STICKER_ID)
+            
+            # 1. Try to send Sticker (Safe Mode)
+            try:
+                await context.bot.send_sticker(chat_id=chat_id, sticker=STICKER_ID)
+            except Exception: 
+                pass # If sticker fails, just ignore it
+
             await context.bot.send_message(
                 chat_id=chat_id, text=f"👋 Hello {query.from_user.first_name}!\n✨ Your theme is now ready..."
             )
-            await context.bot.send_document(chat_id=chat_id, document=FILE_PATH)
+            
+            # 2. Try to send File (With Crash Protection)
+            try:
+                await context.bot.send_document(chat_id=chat_id, document=FILE_PATH)
+            except BadRequest:
+                # This runs if the ID is wrong, instead of crashing the bot
+                await context.bot.send_message(chat_id=chat_id, text="⚠️ **Error:** The file has expired or is invalid.\nPlease contact the admin.")
+            except Exception as e:
+                logger.error(f"File Send Error: {e}")
+                
         else:
             await query.answer( 
                 "⚠️ You must join all channels and groups to download the file.",
@@ -1948,7 +1997,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_spam("flooding (media)")
         return
 
-    is_spam_message, reason = await is_spam(text, entities, user.id, chat.id)
+    is_spam_message, reason = await is_spam(update.message, text, entities, user.id, chat.id)
     if is_spam_message:
         await handle_spam(reason or "spam detected")
         return
