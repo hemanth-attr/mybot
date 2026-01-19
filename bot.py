@@ -1873,85 +1873,72 @@ async def handle_private_reaction(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(f"❌ **Failed.**\nTelegram rejected '{selected_reaction}'.\nMake sure it is a valid single emoji.")
 
 # --- MESSAGE HANDLER ---
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
+    # --- FIX 1: Check for Message OR Edited Message ---
+    # This allows the bot to check text even if the user edits it later.
+    current_msg = update.message or update.edited_message
+    if not current_msg:
         return
     
-    # --- Status Updates (Join/Left) ---
-    if update.message.new_chat_members or update.message.left_chat_member:
+    # --- Status Updates (Join/Left) - Only check these on NEW messages ---
+    if update.message and (update.message.new_chat_members or update.message.left_chat_member):
         if update.message.new_chat_members:
             for member in update.message.new_chat_members:
                 if member.is_bot and member.id != context.bot.id:
                     try:
-                        await context.bot.ban_chat_member(update.message.chat_id, member.id)
+                        await context.bot.ban_chat_member(current_msg.chat_id, member.id)
                     except TelegramError: pass
         try: 
-            await update.message.delete()
+            await current_msg.delete()
         except TelegramError: pass
         return 
         
-    user = update.message.from_user
+    # --- FIX 2: Use 'current_msg' instead of 'update.message' ---
+    user = current_msg.from_user
     chat = update.effective_chat
     
-    text = update.message.text or update.message.caption or ""
-    entities = update.message.entities or update.message.caption_entities
+    text = current_msg.text or current_msg.caption or ""
+    entities = current_msg.entities or current_msg.caption_entities
 
     if not user or not chat: return
-    # === NEW: Activity & Reputation ===
-    if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+
+    # === Activity & Reputation (Skip for Edits) ===
+    # We only increment stats for NEW messages, not every time they edit a typo.
+    if update.message and chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         await db.increment_total_messages(chat.id, user.id)
         
         # Check for Reply + Keyword
-        if update.message.reply_to_message:
-            txt = (update.message.text or "").lower()
-            
-            # Simple check to ensure they aren't thanking themselves
+        if current_msg.reply_to_message:
+            txt = (text).lower()
             if ("+rep" in txt or "thanks" in txt or "thx" in txt):
-                ref = update.message.reply_to_message.from_user
-                
-                # Prevent Self-Rep and Bot-Rep
+                ref = current_msg.reply_to_message.from_user
                 if ref.id != user.id and not ref.is_bot:
-                    
-                    # --- COOLDOWN LOGIC START ---
-                    # 1. Define Key: (Who gave it, Who received it)
                     cooldown_key = (user.id, ref.id)
                     current_time = time.time()
-                    
-                    # 2. Check if they exist in cooldown dict
                     last_given = rep_cooldowns.get(cooldown_key, 0)
                     
-                    # 3. Set limit (e.g., 300 seconds = 5 minutes)
                     if current_time - last_given < 300:
-                        # Optional: Reply to tell them to wait (or just silently return)
-                        await update.message.reply_text(
-                            "⏳ <b>Cooldown:</b> You can only give reputation to the same user once every 5 minutes.",
-                            parse_mode=ParseMode.HTML
-                        )
-                        return # <--- STOP HERE
+                        # Use current_msg to reply
+                        return 
                     
-                    # 4. Update the timestamp
                     rep_cooldowns[cooldown_key] = current_time
-                    # --- COOLDOWN LOGIC END ---
-
-                    # 5. Add Reputation in DB
                     await db.add_reputation(ref.id, 1)
-                    #await update.message.reply_text(f"⭐ +1 Rep to {ref.first_name}!")
  
-    
     if user.id in SYSTEM_BOT_IDS: return
         
     admin_ids = await get_admin_ids(chat, context)
 
-   # ==================================
     # Check for Admins
     if user.id in admin_ids:
         return # Admins are ignored for spam checks
     
     # --- Regular User Spam Checks ---
-    await update_user_activity(chat.id, user.id) 
+    if update.message: # Only log activity for new messages
+        await update_user_activity(chat.id, user.id) 
 
     async def handle_spam(reason_text: str):
-        try: await update.message.delete()
+        try: await current_msg.delete() # Delete the actual message (new or edited)
         except TelegramError as e: logger.error(f"Failed to delete message: {e}")
         
         warn_count, expiry_dt = await db.add_warning_async(chat.id, user.id)
@@ -1997,7 +1984,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_spam("flooding (media)")
         return
 
-    is_spam_message, reason = await is_spam(update.message, text, entities, user.id, chat.id)
+    # Pass 'current_msg' so the spam check looks at the current version of the message
+    is_spam_message, reason = await is_spam(current_msg, text, entities, user.id, chat.id)
     if is_spam_message:
         await handle_spam(reason or "spam detected")
         return
@@ -2005,7 +1993,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if USERNAME_REQUIRED and not user.username:
         await handle_spam("no username")
         return
-        
+
 # ================= Flask Routes =================
 
 @app.route("/", methods=["GET"])
