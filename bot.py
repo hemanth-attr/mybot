@@ -170,6 +170,8 @@ async def is_first_message_critical(chat_id: int, user_id: int, strict_mode_enab
 
 # ================= Spam Detection Functions =================
 
+# ================= Spam Detection Functions =================
+
 async def rule_check(message: Message, message_text: str, message_entities: list[MessageEntity] | None, user_id: int, chat_id: int) -> tuple[bool, str | None]:
     
     settings = await db.get_chat_settings(chat_id)
@@ -182,19 +184,15 @@ async def rule_check(message: Message, message_text: str, message_entities: list
 
     # --- RULE: Block Forwards from Channels/Groups (Zero API Calls) ---
     if message.forward_origin:
-        # Block forwards from Channels
         if isinstance(message.forward_origin, MessageOriginChannel):
             return True, "forwarded a message from a Channel"
-        
         
     # --- RULE: Check "Hidden" Links (Text Links) ---
     if message_entities:
         for entity in message_entities:
-            # Check for clickable text links (e.g. "FREEDOM" linking to a channel)
             if entity.type == MessageEntityType.TEXT_LINK and entity.url:
                 if "t.me/" in entity.url.lower() or "telegram.me/" in entity.url.lower():
                     return True, "sent a hidden Telegram channel link"
-                # If strict mode is ON, block ALL hidden links for new users
                 if BLOCK_ALL_URLS or is_critical_message:
                     return True, "sent a hidden link (not allowed)"
 
@@ -202,7 +200,7 @@ async def rule_check(message: Message, message_text: str, message_entities: list
     if "t.me/" in text_lower or "telegram.me/" in text_lower:
         return True, "Promotion is not allowed here!"
 
-    # Rule 2: Block all other URLs if BLOCK_ALL_URLS is enabled (or for new users)
+    # Rule 2: Block all other URLs
     if BLOCK_ALL_URLS or is_critical_message:
         found_urls = URL_FINDER_REGEX.findall(text_lower)
         allowed_domains_lower = [d.lower() for d in ALLOWED_DOMAINS]
@@ -224,7 +222,6 @@ async def rule_check(message: Message, message_text: str, message_entities: list
             except Exception:
                 return True, "has sent a malformed URL"
 
-
     # Rule 3: Excessive emojis
     if sum(c in SPAM_EMOJIS for c in message_text) > 5:
         return True, "sent excessive emojis"
@@ -233,26 +230,37 @@ async def rule_check(message: Message, message_text: str, message_entities: list
     if any(word in text_lower for word in SPAM_KEYWORDS):
         return True, "sent suspicious keywords (e.g., promo/join now)"
 
-    # Rule 5: Excessive formatting (if entities are present)
+    # Rule 5: Excessive formatting
     if message_entities:
         formatting_count = sum(1 for entity in message_entities if entity.type in FORMATTING_ENTITY_TYPES)
         if formatting_count >= MAX_FORMATTING_ENTITIES:
             return True, "used excessive formatting/bolding"
     
-    # Rule 6: Flood check (uses in-memory data)
+    # Rule 6: Flood check
     if is_flood_spam(user_id):
         return True, "is flooding the chat"
 
     return False, None
 
-# Updated is_spam now accepts 'message' and passes it to rule_check
+async def ml_check(message_text: str, chat_id: int) -> bool:
+    """Uses a trained ML model to detect tricky spam. Relies on DB settings."""
+    settings = await db.get_chat_settings(chat_id)
+    if not settings.get("ml_mode", False):
+        return False
+    if ML_MODEL and TFIDF_VECTORIZER:
+        processed_text = TFIDF_VECTORIZER.transform([unidecode(message_text)])
+        prediction = ML_MODEL.predict(processed_text)[0]
+        return prediction == 1
+    return False
 
-async def is_spam(message_text: str, message_entities: list[MessageEntity] | None, user_id: int, chat_id: int) -> tuple[bool, str | None]:
+# --- CORRECT 5-ARGUMENT VERSION (Only ONE definition allowed) ---
+async def is_spam(message: Message, message_text: str, message_entities: list[MessageEntity] | None, user_id: int, chat_id: int) -> tuple[bool, str | None]:
     """Hybrid spam detection combining rules and ML."""
     if not message_text:
         return False, None
 
-    is_rule_spam, reason = await rule_check(message_text, message_entities, user_id, chat_id)
+    # Pass 'message' to rule_check so it can check Forwards
+    is_rule_spam, reason = await rule_check(message, message_text, message_entities, user_id, chat_id)
     if is_rule_spam:
         return True, reason
 
