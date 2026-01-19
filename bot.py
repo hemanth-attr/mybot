@@ -246,35 +246,6 @@ async def rule_check(message: Message, message_text: str, message_entities: list
     return False, None
 
 # Updated is_spam now accepts 'message' and passes it to rule_check
-async def is_spam(message: Message, message_text: str, message_entities: list[MessageEntity] | None, user_id: int, chat_id: int) -> tuple[bool, str | None]:
-    """Hybrid spam detection combining rules and ML."""
-    if not message_text:
-        return False, None
-
-    # PASS message HERE
-    is_rule_spam, reason = await rule_check(message, message_text, message_entities, user_id, chat_id)
-    if is_rule_spam:
-        return True, reason
-
-    if await ml_check(message_text, chat_id):
-        settings = await db.get_chat_settings(chat_id)
-        is_critical = await is_first_message_critical(chat_id, user_id, settings.get("strict_mode", False))
-        if is_critical:
-              return True, "sent a spam message (ML/First Message Flag)"
-        return True, "sent a spam message (ML Model)"
-        
-    return False, None
-
-async def ml_check(message_text: str, chat_id: int) -> bool:
-    """Uses a trained ML model to detect tricky spam. Relies on DB settings."""
-    settings = await db.get_chat_settings(chat_id)
-    if not settings.get("ml_mode", False):
-        return False
-    if ML_MODEL and TFIDF_VECTORIZER:
-        processed_text = TFIDF_VECTORIZER.transform([unidecode(message_text)])
-        prediction = ML_MODEL.predict(processed_text)[0]
-        return prediction == 1
-    return False
 
 async def is_spam(message_text: str, message_entities: list[MessageEntity] | None, user_id: int, chat_id: int) -> tuple[bool, str | None]:
     """Hybrid spam detection combining rules and ML."""
